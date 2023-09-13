@@ -32,6 +32,7 @@ case class Axi4WriteOnlyUpsizer(inputConfig : Axi4Config, outputConfig : Axi4Con
     val size = Reg(UInt(3 bits))
     val outputValid = RegInit(False) clearWhen(io.output.writeData.ready)
     val outputLast = Reg(Bool())
+    val id =  if(outputConfig.idWidth>0) Reg(UInt(outputConfig.idWidth bits)) else Reg(UInt(1 bit))
     val busy = RegInit(False)
     val incrementByteCounter, alwaysFire = Reg(Bool())
     val byteCounterNext = (U"0" @@ byteCounter) + (U"1" << size).resized
@@ -42,12 +43,12 @@ case class Axi4WriteOnlyUpsizer(inputConfig : Axi4Config, outputConfig : Axi4Con
     when(io.output.writeData.fire){
       maskBuffer := 0
     }
-
     io.output.writeData.valid := outputValid
     io.input.writeData.ready := busy && !io.output.writeData.isStall
     io.output.writeData.data := dataBuffer
     io.output.writeData.strb := maskBuffer
     io.output.writeData.last := outputLast
+    if(outputConfig.idWidth>0) io.output.writeData.id := id
 
     when(io.input.writeData.fire){
       outputValid := byteCounterNext(widthOf(byteCounter)) || io.input.writeData.last || alwaysFire
@@ -56,6 +57,7 @@ case class Axi4WriteOnlyUpsizer(inputConfig : Axi4Config, outputConfig : Axi4Con
       }
       busy clearWhen(io.input.writeData.last)
       outputLast := io.input.writeData.last
+      if(inputConfig.idWidth>0) id := io.input.writeData.id else id := U(0)
       for(outputByte <- 0 until outputConfig.bytePerWord) when(byteActivity(outputByte)){
         val inputByte = outputByte % inputConfig.bytePerWord
         dataBuffer(outputByte*8+7 downto outputByte*8) := io.input.writeData.data(inputByte*8+7 downto inputByte*8)

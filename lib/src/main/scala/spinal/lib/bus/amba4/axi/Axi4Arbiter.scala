@@ -67,7 +67,7 @@ case class Axi4WriteOnlyArbiter(outputConfig: Axi4Config,
   io.output.writeCmd << cmdOutputFork
   io.output.writeCmd.id.removeAssignments()
   io.output.writeCmd.id := (cmdArbiter.io.chosen @@ cmdArbiter.io.output.id)
-  
+
   // Route writeData
   var routeBuffer = cmdRouteFork.translateWith(cmdArbiter.io.chosen).queueLowLatency(routeBufferSize, latency = routeBufferLatency)
   if(routeBufferM2sPipe) routeBuffer = routeBuffer.m2sPipe()
@@ -75,6 +75,8 @@ case class Axi4WriteOnlyArbiter(outputConfig: Axi4Config,
   val routeDataInput = io.inputs(routeBuffer.payload).writeData
   io.output.writeData.valid := routeBuffer.valid && routeDataInput.valid
   io.output.writeData.payload  := routeDataInput.payload
+  io.output.writeData.id.removeAssignments()
+  io.output.writeData.id := (routeBuffer.payload @@ routeDataInput.id)
   io.inputs.zipWithIndex.foreach{case(input,idx) => {
     input.writeData.ready := routeBuffer.valid && io.output.writeData.ready && routeBuffer.payload === idx
   }}

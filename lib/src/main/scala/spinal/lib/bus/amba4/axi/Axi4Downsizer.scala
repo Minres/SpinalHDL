@@ -163,6 +163,7 @@ case class Axi4WriteOnlyDownsizer(inputConfig: Axi4Config, outputConfig: Axi4Con
     val staleData = !streamCounter.io.working
     writeStream.writeData.translateFrom(dataStream.haltWhen(staleData)) { (to, from) =>
         to.data := from.data(offset << 3, outputConfig.dataWidth bits)
+        if (outputConfig.idWidth>0) to.id := from.id
         if (outputConfig.useLast) to.last := streamCounter.io.last
         if (outputConfig.useStrb) to.strb := from.strb(offset, outputConfig.bytePerWord bits)
         to.assignUnassignedByName(from)

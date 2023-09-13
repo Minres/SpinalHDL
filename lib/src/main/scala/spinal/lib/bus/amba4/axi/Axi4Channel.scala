@@ -174,6 +174,7 @@ class Axi4Arw(config: Axi4Config) extends Axi4Ax(config, config.arwUserWidth, re
  * @param config Axi4 configuration class
  */
 case class Axi4W(config: Axi4Config) extends Bundle {
+  val id   = if(config.useId)    UInt(config.idWidth bits)    else null
   val data = Bits(config.dataWidth bits)
   val strb = if(config.useStrb)  Bits(config.bytePerWord bits) else null
   val user = if(config.useWUser) Bits(config.wUserWidth bits)  else null
