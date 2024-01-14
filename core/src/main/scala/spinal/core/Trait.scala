@@ -22,7 +22,7 @@ package spinal.core
 
 import spinal.core.DslScopeStack.storeAsMutable
 import spinal.core.Nameable._
-import spinal.core.fiber.Handle
+import spinal.core.fiber.{Fiber, Handle}
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, Stack}
@@ -118,6 +118,10 @@ class GlobalData(val config : SpinalConfig) {
   var scalaLocatedEnable = false
   val scalaLocatedComponents = mutable.HashSet[Class[_]]()
   val scalaLocateds = mutable.HashSet[ScalaLocated]()
+  val elab = new Fiber()
+  elab.setName("global_elab")
+  elab.inflightLock.globalData = this
+  var onAreaInit = Option.empty[Area => Unit]
 
   def applyScalaLocated(): Unit ={
     try {
@@ -190,7 +194,7 @@ class GlobalData(val config : SpinalConfig) {
 
 /** Get a link to the globalData */
 trait GlobalDataUser {
-  val globalData = GlobalData.get
+  var globalData = GlobalData.get
 }
 
 
@@ -270,7 +274,7 @@ trait Assignable {
     }
   }
 
-  private[core] def assignFromImpl(that: AnyRef, target: AnyRef, kind: AnyRef)(implicit loc: Location): Unit
+  protected def assignFromImpl(that: AnyRef, target: AnyRef, kind: AnyRef)(implicit loc: Location): Unit
 
   def getRealSourceNoRec: Any
 
@@ -769,6 +773,15 @@ trait SpinalTag {
     that.addTag(this)
     that
   }
+  def apply(that : SpinalTagReady, others : SpinalTagReady*) : Unit = {
+    apply(that)
+    others.foreach(apply)
+  }
+}
+
+
+trait SpinalTagGetter[T] extends SpinalTag{
+  def get() : T
 }
 
 class DefaultTag(val that: BaseType) extends SpinalTag

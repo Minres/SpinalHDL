@@ -23,6 +23,7 @@ import spinal.core.internals._
 import java.io.UTFDataFormatException
 import java.nio.charset.Charset
 import spinal.core._
+import spinal.lib.bus.misc.AddressTransformer
 
 import scala.collection.{Seq, TraversableOnce, mutable}
 import scala.collection.mutable.{ArrayBuffer, LinkedHashMap, ListBuffer}
@@ -44,6 +45,17 @@ object UIntToOh {
     }
     ret
   }
+}
+
+// Meaning that value 2 will give 0011 instead of 0100
+object UIntToOhMinusOne {
+  def apply(value: UInt, width: Int): Bits = {
+    if (width <= 0) B(0, width bits)
+    else B(U(B(1, width bits) |<< value)-1)
+  }
+
+
+  def apply(value : UInt) : Bits = apply(value,  1 << widthOf(value))
 }
 
 
@@ -313,6 +325,23 @@ object OHMasking{
     val (pLow, pHigh) = doubleOh.splitAt(width)
     val selOh = pHigh | pLow
   }.selOh
+
+  /** Easy to use round robin. Priorities are cleared as soon as there is no requests pending
+   *
+   * @param requests
+   * @param next Move on to the next priority
+   */
+  def roundRobinNext[T <: Data](requests : T, next : Bool): Bits = new Composite(requests, "roundRobinNext"){
+    val input = B(requests)
+    val width = widthOf(requests)
+    val priority = Reg(Bits(width bits)) init(0)
+    val selOh = roundRobinMaskedFull(requests, priority)
+
+    val overflow = (priority & input) === 0
+    when(next){
+      priority := priority.orMask(overflow) & ~selOh
+    }
+  }.selOh
 }
 
 object CountOne{
@@ -363,6 +392,17 @@ object LeastSignificantBitSet{
     }
     ret
   }
+}
+
+object PropagateOnes{
+  def toLsb[T <: BitVector](that : T) : T = {
+    val ret =  cloneOf(that)
+    for(i <- ret.bitsRange){
+      ret(i) := that.dropLow(i).orR
+    }
+    ret
+  }
+  def toMsb[T <: BitVector](that : T) : T = toLsb(that.reversed).reversed
 }
 
 
@@ -582,15 +622,17 @@ class Counter(val start: BigInt,val end: BigInt) extends ImplicitArea[UInt] {
 }
 
 object Timeout {
-  def apply(cycles: BigInt) : Timeout = new Timeout(cycles)
-  def apply(time: TimeNumber) : Timeout = new Timeout((time*ClockDomain.current.frequency.getValue).toBigInt)
-  def apply(frequency: HertzNumber) : Timeout = Timeout(frequency.toTime)
+  def apply(cycles: BigInt): Timeout = new Timeout(cycles)
+
+  def apply(time: TimeNumber): Timeout = new Timeout((time * ClockDomain.current.frequency.getValue).toBigInt)
+
+  def apply(frequency: HertzNumber): Timeout = Timeout(frequency.toTime)
 }
 
-class Timeout(val limit: BigInt) extends ImplicitArea[Bool] {
+class Timeout(val limit: BigInt, init: Bool = False) extends ImplicitArea[Bool] {
   assert(limit > 1)
 
-  val state = RegInit(False)
+  val state = RegInit(init)
   val stateRise = False
 
   val counter = CounterFreeRun(limit)
@@ -610,6 +652,11 @@ class Timeout(val limit: BigInt) extends ImplicitArea[Bool] {
     this
   }
 
+  def init(value: Bool): this.type = {
+    state.removeInitAssignments()
+    state.init(value)
+    this
+  }
 
   override def implicitValue: Bool = state
 }
@@ -649,7 +696,7 @@ object CounterUpDown {
   //  implicit def implicitValue(c: Counter) = c.value
 }
 
-class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
+class CounterUpDown(val stateCount: BigInt, val handleOverflow : Boolean = true) extends ImplicitArea[UInt] {
   val incrementIt = False
   val decrementIt = False
 
@@ -662,7 +709,8 @@ class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
 
   val valueNext = UInt(log2Up(stateCount) bit)
   val value = RegNext(valueNext) init(0)
-  val willOverflowIfInc = value === stateCount - 1 && !decrementIt
+  val mayOverflow = value === stateCount - 1
+  val willOverflowIfInc = mayOverflow && !decrementIt
   val willOverflow = willOverflowIfInc && incrementIt
 
   val finalIncrement = UInt(log2Up(stateCount) bit)
@@ -674,7 +722,7 @@ class CounterUpDown(val stateCount: BigInt) extends ImplicitArea[UInt] {
     finalIncrement := 0
   }
 
-  if (isPow2(stateCount)) {
+  if (isPow2(stateCount) || !handleOverflow) {
     valueNext := (value + finalIncrement).resized
   }
   else {
@@ -709,18 +757,20 @@ object CounterMultiRequest {
 object AnalysisUtils{
   def seekNonCombDrivers(that : BaseType)(body : Any => Unit): Unit ={
     that.foreachStatements{ s =>
-      def walkExp(e : Expression) = e match {
+      def forExp(e : Expression) : Unit = e match {
         case s : Statement => s match {
           case s : BaseType if s.isComb => {seekNonCombDrivers(s)(body) }
           case s : BaseType if !s.isComb => body(s)
           case s =>
         }
-        case e : Expression =>
+        case e: MemReadSync =>
+        case e: MemReadWrite =>
+        case e : Expression => e.foreachDrivingExpression(forExp)
       }
       s.walkParentTreeStatementsUntilRootScope{sParent =>
-        sParent.walkDrivingExpressions(walkExp)
+        sParent.foreachDrivingExpression(forExp)
       }
-      s.walkDrivingExpressions(walkExp)
+      s.foreachDrivingExpression(forExp)
     }
   }
 
@@ -734,6 +784,10 @@ object AnalysisUtils{
       }
       case o if o.isOutput => {
         val cds = mutable.LinkedHashSet[ClockDomain]()
+        println(o)
+        if(o.getName() == "io_ddrA_r_ready"){
+          println("asd")
+        }
         seekNonCombDrivers(o){
           case bt : BaseType if bt.isReg => cds += bt.clockDomain
           case _ => println("???")
@@ -861,49 +915,13 @@ object LatencyAnalysis {
 
     SpinalError("latencyAnalysis don't find any path")
     -1
-//    val walked = mutable.Set[Expression]()
-//    var pendingStack = mutable.ArrayBuffer[Expression](to)
-//    var depth = 0;
-//
-//    while (pendingStack.size != 0) {
-//      val iterOn = pendingStack
-//      pendingStack = new mutable.ArrayBuffer[Expression](10000)
-//      for (start <- iterOn) {
-//        if (walk(start)) return depth;
-//      }
-//      depth = depth + 1
-//    }
-//
-//    def walk(that: Expression, depth: Integer = 0): Boolean = {
-//      if (that == null) return false
-//      if (walked.contains(that)) return false
-//      walked += that
-//      if (that == from)
-//        return true
-//      that match {
-//        case delay: SyncNode => {
-//          for (input <- delay.getAsynchronousInputs) {
-//            if (walk(input)) return true
-//          }
-//          pendingStack ++= delay.getSynchronousInputs
-//        }
-//        case _ => {
-//          that.onEachInput(input =>  {
-//            if (walk(input)) return true
-//          })
-//        }
-//      }
-//      false
-//    }
-//
-//    SpinalError("latencyAnalysis don't find any path")
-//    -1
   }
 }
 
 object DataCarrier{
   implicit def toImplicit[T <: Bundle](dataCarrier: DataCarrier[T]): T = dataCarrier.payload
   implicit def toImplicit2[T <: Bundle](dataCarrier: DataCarrier[Fragment[T]]): T = dataCarrier.fragment
+  implicit def toImplicit3[T <: Bundle](dataCarrier: DataCarrier[Fragment[Fragment[T]]]): Fragment[T] = dataCarrier.payload
 }
 
 trait DataCarrier[T <: Data] {
@@ -1056,6 +1074,20 @@ class TraversableOnceAnyPimped[T <: Any](pimped: Seq[T]) {
     }
     ret
   }
+
+  class ReaderOh(oh : TraversableOnce[Bool], bypassIfSingle : Boolean = false) {
+    def apply[T2 <: Data](f : T => T2) = OHMux.or(oh.toIndexedSeq, pimped.map(f), bypassIfSingle)
+  }
+
+  class ReaderSel(sel : UInt) {
+    def apply[T2 <: Data](f : T => T2) =  pimped.map(f).read(sel)
+  }
+
+  def reader(oh : TraversableOnce[Bool]) = new ReaderOh(oh)
+  def reader(oh: Bits) = new ReaderOh(oh.asBools)
+  def reader(oh: TraversableOnce[Bool], bypassIfSingle: Boolean) = new ReaderOh(oh, bypassIfSingle)
+  def reader(oh: Bits, bypassIfSingle: Boolean) = new ReaderOh(oh.asBools, bypassIfSingle)
+  def reader(sel : UInt) = new ReaderSel(sel)
 }
 
 
@@ -1069,9 +1101,20 @@ class TraversableOnceAnyTuplePimped[T <: Any, T2 <: Any](pimped: Seq[(T, T2)]) {
 }
 
 class TraversableOnceBoolPimped(pimped: Seq[Bool]) {
-  def orR: Bool  = pimped.asBits =/= 0
-  def andR: Bool = pimped.reduce(_ && _)
-  def xorR: Bool = pimped.reduce(_ ^ _)
+  def orR: Bool  = pimped.asBits.orR
+  def andR: Bool = pimped.asBits.andR
+  def xorR: Bool = pimped.asBits.xorR
+
+  def norR: Bool = pimped.asBits === 0
+  def nandR: Bool = !nandR
+  def nxorR: Bool = !xorR
+}
+
+class TraversableOnceAddressTransformerPimped(pimped: Seq[AddressTransformer]) {
+  def apply(address : BigInt) : BigInt = pimped.foldLeft(address)((a, t) => t(a))
+  def apply(address : UInt) : UInt = pimped.foldLeft(address)((a, t) => t(a))
+  def invert(address : BigInt) : BigInt = pimped.foldRight(address)((t, a) => t.invert(a))
+  def invert(address : UInt) : UInt = pimped.foldRight(address)((t, a) => t.invert(a))
 }
 
 class TraversableOncePimped[T <: Data](pimped: Seq[T]) {

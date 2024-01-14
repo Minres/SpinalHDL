@@ -85,10 +85,10 @@ class ComponentEmitterVerilog(
       val EDAcomment = s"${emitCommentAttributes(baseType.instanceAttributes)}"  //like "/* verilator public */"
 
       if(outputsToBufferize.contains(baseType) || baseType.isInput){
-        portMaps += f"${syntax}${dir}%6s ${""}%3s ${section}%-8s ${name}${EDAcomment}${comma}"
+        portMaps += f"${syntax}${dir}%6s wire ${section}%-8s ${name}${EDAcomment}${comma}"
       } else {
-        val isReg   = if(signalNeedProcess(baseType)) "reg" else ""
-        portMaps += f"${syntax}${dir}%6s ${isReg}%3s ${section}%-8s ${name}${EDAcomment}${comma}"
+        val isReg   = if(signalNeedProcess(baseType)) "reg" else "wire"
+        portMaps += f"${syntax}${dir}%6s ${isReg}%-4s ${section}%-8s ${name}${EDAcomment}${comma}"
       }
     }
   }
@@ -174,15 +174,15 @@ class ComponentEmitterVerilog(
     cutLongExpressions()
     expressionToWrap --= wrappedExpressionToName.keysIterator
 
-    component.dslBody.walkStatements{ s =>
-      s.walkDrivingExpressions{ e =>
-        if(!e.isInstanceOf[DeclarationStatement] && expressionToWrap.contains(e)){
-          var sName = s match {
-            case s : AssignmentStatement => "_" + s.dlcParent.getName()
-            case s : WhenStatement => "_when"
-            case s : SwitchContext => "_switch"
-            case s : Nameable => "_" + s.getName()
-            case s : MemPortStatement => "_" + s.dlcParent.getName() + "_port"
+    component.dslBody.walkStatements { s =>
+      s.walkDrivingExpressions { e =>
+        if (!e.isInstanceOf[DeclarationStatement] && expressionToWrap.contains(e)) {
+          val sName = s match {
+            case s: AssignmentStatement => "_" + s.dlcParent.getName()
+            case _: WhenStatement => "_when"
+            case _: SwitchContext => "_switch"
+            case s: MemPortStatement => "_" + s.dlcParent.getName() + "_port"
+            case s: Nameable => "_" + s.getName()
             case _ => ""
           }
           val name = component.localNamingScope.allocateName(anonymSignalPrefix + sName)
@@ -1050,10 +1050,10 @@ class ComponentEmitterVerilog(
             " = $urandom"
           case bv: BitVector =>
             val randCount = (bv.getBitsWidth+31)/32
-            s" = {${randCount}{$$urandom}}"
+            s" = {${(Array.fill(randCount)("$urandom")).mkString(",")}}"
           case e: SpinalEnumCraft[_] =>
             val randCount = (e.getBitsWidth+31)/32
-            s" = {${randCount}{$$urandom}}"
+            s" = {${(Array.fill(randCount)("$urandom")).mkString(",")}}"
         }
       }
     }
@@ -1429,8 +1429,8 @@ end
 
     def onEachExpression(e: Expression): Unit = {
       e match {
-        case node: SubAccess => applyTo(node.getBitVector)
-        case node: Resize    => applyTo(node.input)
+        case node: Resize    if !node.input.isInstanceOf[BaseType] => applyTo(node.input)
+        case node: SubAccess if !node.getBitVector.isInstanceOf[BaseType] => applyTo(node.getBitVector)
         case _               =>
       }
     }
@@ -1438,8 +1438,8 @@ end
     def onEachExpressionNotDrivingBaseType(e: Expression): Unit = {
       onEachExpression(e)
       e match {
-    //    case node: Literal => applyTo(node)
         case node: Resize                           => applyTo(node)
+        case node: Literal                          => // Avoid triggering on SInt literals
         case node if node.getTypeObject == TypeSInt => applyTo(node)
         case node: Operator.UInt.Add                => applyTo(node)
         case node: Operator.UInt.Sub                => applyTo(node)
