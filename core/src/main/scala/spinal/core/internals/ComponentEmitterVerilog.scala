@@ -1243,10 +1243,10 @@ class ComponentEmitterVerilog(
           val filledValue = "0" * (mem.getWidth - unfilledValue.length) + unfilledValue
           if (memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1) {
             for (i <- 0 until symbolCount) {
-              b ++= s"${tab}${emitReference(mem, false)}_symbol$i[$index] = 'b${filledValue.substring(symbolWidth * (symbolCount - i - 1), symbolWidth * (symbolCount - i))};\n"
+              b ++= s"${tab}${emitReference(mem, false)}_symbol$i[$index] <= 'b${filledValue.substring(symbolWidth * (symbolCount - i - 1), symbolWidth * (symbolCount - i))};\n"
             }
           } else {
-            b ++= s"${tab}${emitReference(mem, false)}[$index] = ${filledValue.length}'b$filledValue;\n"
+            b ++= s"${tab}${emitReference(mem, false)}[$index] <= ${filledValue.length}'b$filledValue;\n"
           }
         }
 
