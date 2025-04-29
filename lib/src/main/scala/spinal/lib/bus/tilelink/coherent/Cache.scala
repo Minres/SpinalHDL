@@ -184,6 +184,8 @@ class Cache(val p : CacheParam) extends Component {
 
     val tags = new Area {
       val ram = Mem.fill(sets)(Vec.fill(ways)(Tags(withData)))
+      if(GlobalData.get.config.device == Device.ASIC)
+        ram.technology = registerFile
       val read = ram.readSyncPort
       val writeRaw = ram.writePortWithMask(ways)
       val write = new Area{
