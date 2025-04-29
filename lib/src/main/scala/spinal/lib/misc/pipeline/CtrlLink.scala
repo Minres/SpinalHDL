@@ -71,8 +71,6 @@ trait CtrlApi {
   def forgetOneNow()(implicit loc: Location): Unit = forgetOneWhen(ConditionalContext.isTrue)
   def ignoreReadyNow()(implicit loc: Location): Unit = ignoreReadyWhen(ConditionalContext.isTrue)
 
-  val bypasses = mutable.LinkedHashMap[NamedTypeKey, Data]()
-
   def forkStream[T <: Data](forceSpawn : Option[Bool] = Option.empty[Bool]): Stream[NoData] = {
     val ret = Stream(NoData())
     val fired = RegInit(False) setCompositeName(ret, "fired")
@@ -103,9 +101,10 @@ class CtrlLink(override val up : Node, override val down : Node) extends Link wi
   override def getCtrl: CtrlLink = this
 
   def nameFromLocation[T <: Data](that: T, prefix: String)(implicit loc: Location): T = {
-    that.setCompositeName(this, prefix + "_" + loc.file + "_l" + loc.line, Nameable.REMOVABLE)
+    that.setCompositeName(this, prefix + "_" + loc.fileSymbol + "_l" + loc.line, Nameable.REMOVABLE)
   }
 
+  val bypasses = mutable.LinkedHashMap[NamedTypeKey, Data]()
   val requests = new{
     val halts = ArrayBuffer[Bool]()
     val duplicates = ArrayBuffer[Bool]()
@@ -147,9 +146,6 @@ class CtrlLink(override val up : Node, override val down : Node) extends Link wi
     if(down.ctrl.valid.nonEmpty) down.valid := up.valid
     if(up.ctrl.ready.nonEmpty) {
       up.ready := down.isReady
-      if(requests.ignoresReady.nonEmpty) when(requests.ignoresReady.orR){
-        up.ready := True
-      }
     }
     if(requests.halts.nonEmpty) when(requests.halts.orR){
       down.valid := False
@@ -160,6 +156,11 @@ class CtrlLink(override val up : Node, override val down : Node) extends Link wi
     }
     if(requests.terminates.nonEmpty) when(requests.terminates.orR){
       down.valid := False
+    }
+    if (up.ctrl.ready.nonEmpty) {
+      if (requests.ignoresReady.nonEmpty) when(requests.ignoresReady.orR) {
+        up.ready := True
+      }
     }
     val matches = down.fromUp.payload.intersect(up.fromDown.payload)
     for (m <- matches) {

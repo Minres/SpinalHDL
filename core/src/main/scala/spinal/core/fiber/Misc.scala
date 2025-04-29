@@ -40,10 +40,12 @@ class RetainerHold extends Handle[Unit] {
 }
 
 
-case class Retainer() extends Nameable{
+case class Retainer() extends Area{
   val retainers = mutable.Queue[RetainerHold]()
   def apply() : RetainerHold = {
     val rh = new RetainerHold()
+    soon(rh)
+    rh.willBeLoadedBy = Engine.get.currentAsyncThread
     retainers += rh
     rh
   }
@@ -56,8 +58,12 @@ case class Retainer() extends Nameable{
       return;
     }
 
+    if(retainers.isEmpty) return;
+
     busy = true
     locker.retain()
+    locker.willBeLoadedBy = AsyncThread.current
+    AsyncThread.current.willLoadHandles += locker
     while (retainers.nonEmpty) {
       val pop = retainers.dequeue()
       pop.await()

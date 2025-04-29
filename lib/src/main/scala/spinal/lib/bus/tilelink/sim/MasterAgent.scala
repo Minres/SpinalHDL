@@ -2,9 +2,11 @@ package spinal.lib.bus.tilelink.sim
 
 import spinal.core._
 import spinal.core.sim._
+import spinal.lib._
 import spinal.lib.bus.tilelink._
 import spinal.lib.sim.{StreamDriver, StreamDriverOoo, StreamMonitor, StreamReadyRandomizer}
 
+import java.nio.ByteBuffer
 import scala.collection.mutable
 
 class OrderingArgs(val offset : Int, val bytes : Int){
@@ -41,14 +43,19 @@ case class Probe(source : Int, param : Int, address : Long, size : Int, perm : B
 
 }
 
-class MasterAgent (val bus : Bus, val cd : ClockDomain, val blockSize : Int = 64)(implicit idAllocator: IdAllocator) extends MonitorSubscriber{
+class MasterAgent (val bus : Bus, val cd : ClockDomain)(implicit idAllocator: IdAllocator) extends MonitorSubscriber{
   var debug = false
 
   val driver = new MasterDriver(bus, cd)
   val monitor = new Monitor(bus, cd).add(this)
   val callbackOnAtoD, callbackOnCtoD = Array.fill[TransactionD => Unit](1 << bus.p.sourceWidth)(null)
 
-
+  var blockSize = 64
+  try{
+    blockSize = bus.p.node.s.emits.probe.getSingleSize().get
+  }catch{
+    case e : Throwable =>
+  }
   val releaseIds = Array.fill(1 << bus.p.sourceWidth) (SimMutex())
 
   def waitAtoD(source : Int) : TransactionD = {
@@ -126,11 +133,15 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain, val blockSize : Int = 64
 
   def onGrant(source : Int, address : Long, param : Int) : Unit = {}
 
+  val withIdAllocation = idAllocator != null
+  def allocateDebugId() = if(withIdAllocation)  idAllocator.allocate() else 0
+  def freeDebugId(debugId : Long) = if(withIdAllocation) idAllocator.remove(debugId)
 
-
+  def getInt(source : Int, address : Long) = ByteBuffer.wrap(get(0, address, 4).data.reverse).getInt
+  def putInt(source : Int, address : Long, data : Int) = putFullData(0, address, ByteBuffer.allocate(4).putInt(data).array().reverse)
 
   def get(source : Int, address : Long, bytes : Int) : TransactionD = {
-    val debugId = idAllocator.allocate()
+    val debugId = allocateDebugId()
     val a = TransactionA()
     a.opcode  = Opcode.A.GET
     a.size    = log2Up(bytes)
@@ -142,14 +153,14 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain, val blockSize : Int = 64
     val d = waitAtoD(source)
     assert(d.opcode == Opcode.D.ACCESS_ACK_DATA, s"Unexpected transaction on $bus")
     assert(d.bytes == bytes, s"Unexpected transaction on $bus")
-    idAllocator.remove(debugId)
+    freeDebugId(debugId)
     d
   }
 
 
   def putPartialData(source : Int, address : Long, data : Seq[Byte], mask : Seq[Boolean]) : TransactionD = {
     val bytes = data.size
-    val debugId = idAllocator.allocate()
+    val debugId = allocateDebugId()
     val a = TransactionA()
     a.opcode  = Opcode.A.PUT_PARTIAL_DATA
     a.size    = log2Up(bytes)
@@ -163,13 +174,13 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain, val blockSize : Int = 64
     val d = waitAtoD(source)
     assert(d.opcode == Opcode.D.ACCESS_ACK, s"Unexpected transaction on $bus")
     assert(d.bytes == bytes, s"Unexpected transaction on $bus")
-    idAllocator.remove(debugId)
+    freeDebugId(debugId)
     d
   }
 
   def putFullData(source : Int, address : Long, data : Seq[Byte]) : TransactionD = {
     val bytes = data.size
-    val debugId = idAllocator.allocate()
+    val debugId = allocateDebugId()
     val a = TransactionA()
     a.opcode  = Opcode.A.PUT_FULL_DATA
     a.size    = log2Up(bytes)
@@ -183,7 +194,7 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain, val blockSize : Int = 64
     val d = waitAtoD(source)
     assert(d.opcode == Opcode.D.ACCESS_ACK, s"Unexpected transaction on $bus")
     assert(d.bytes == bytes, s"Unexpected transaction on $bus")
-    idAllocator.remove(debugId)
+    freeDebugId(debugId)
     d
   }
 

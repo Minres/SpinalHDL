@@ -61,10 +61,11 @@ class ScopeStatement(var parentStatement: TreeStatement) {
 
   def push() = DslScopeStack.set(this)
 
-  def on(body : => Unit): Unit = {
+  def on[T](body : => T): T = {
     val ctx = push()
-    body
+    val ret = body
     ctx.restore()
+    ret
   }
 
   //Execute body on the head of the ScopeStatement list
@@ -217,6 +218,7 @@ trait Statement extends ExpressionContainer with ContextUser with ScalaLocated w
   }
 
   def foreachClockDomain(func: ClockDomain => Unit): Unit = {}
+  def remapClockDomain(func: ClockDomain => ClockDomain): Unit = {}
 
   def removeStatementFromScope() : Unit = {
     if(lastScopeStatement != null){
@@ -637,6 +639,10 @@ case class AssertStatement(var cond: Expression, message: Seq[Any], severity: As
 
   override def foreachClockDomain(func: (ClockDomain) => Unit): Unit = trigger match {
     case AssertStatementTrigger.CLOCKED => func(clockDomain)
+    case AssertStatementTrigger.INITIAL =>
+  }
+  override def remapClockDomain(func: ClockDomain => ClockDomain) = trigger match {
+    case AssertStatementTrigger.CLOCKED => clockDomain = func(clockDomain)
     case AssertStatementTrigger.INITIAL =>
   }
 }

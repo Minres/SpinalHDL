@@ -24,20 +24,20 @@ import spinal.core.internals.Operator.Formal
 import spinal.core.internals._
 import spinal.idslplugin.Location
 
-/** Bool factory used for instance by the IODirection to create a in/out Bool() */
+/** `Bool` factory used for instance by the IODirection to create a in/out Bool() */
 trait BoolFactory {
   @deprecated("Use `Bool()` (with braces) instead")
   def Bool: Bool = Bool()
 
-  /** Create a new Bool */
+  /** Create a new `Bool` */
   def Bool(u: Unit = ()): Bool = new Bool
 
-  /** Create a new Bool with a value */
+  /** Create a new `Bool` with a value */
   def Bool(value: Boolean)(implicit loc: Location): Bool = BoolLiteral(value, Bool().setAsTypeNode())
 }
 
 /**
-  * The Bool type corresponds to a boolean value (True or False)
+  * The `Bool` type corresponds to a hardware boolean value (`True` or `False`)
   *
   * @example {{{
   *     val myBool = Bool()
@@ -45,7 +45,7 @@ trait BoolFactory {
   *     myBool := Bool(false)
   * }}}
   *
-  * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Bool Bool Documentation]]
+  * @see  [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Data%20types/bool.html Bool Documentation]]
   */
 class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[Bool]  with BitwiseOp[Bool]{
 
@@ -58,35 +58,62 @@ class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[B
   private[spinal] override def _data: Bool = this
 
   /**
-    * Logical AND
+    * Hardware logical AND
     * @example{{{ val result = myBool1 && myBool2 }}}
     * @return a Bool assign with the AND result
     */
   def &&(b: Bool): Bool = wrapLogicalOperator(b, new Operator.Bool.And)
   override def &(b: Bool): Bool = this && b
 
-  /**
-    * Logical OR
+  /** Hardware logical OR
     * @example{{{ val result = myBool1 || myBool2 }}}
     * @return a Bool assign with the OR result
     */
   def ||(b: Bool): Bool = wrapLogicalOperator(b, new Operator.Bool.Or)
+
+  /** Hardware alternative to logical OR
+    * @example{{{ val result = myBool1 | myBool2 }}}
+    * @return a Bool assign with the OR result
+    */
   override def |(b: Bool): Bool = this || b
 
+  /** Hardware logical XOR
+    * @example{{{ val result = myBool1 ^ myBool2 }}}
+    * @return a Bool assign with the XOR result
+    */
   override def ^(b: Bool): Bool  = wrapLogicalOperator(b, new Operator.Bool.Xor)
 
-  /**
-    * Logical NOT
+  /** Hardware logical NOT
     * @example{{{ val result = !myBool1 }}}
     * @return a Bool assign with the NOT result
     */
   def unary_! : Bool = wrapUnaryOperator(new Operator.Bool.Not)
 
+  def isUnknown: Bool = wrapUnaryOperator(new Operator.BitVector.IsUnknown)
+
+  /** Hardware alternative to logical NOT
+    * @example{{{ val result = ~myBool1 }}}
+    * @return a Bool assign with the NOT result
+    */
   override def unary_~ : Bool = ! this
 
-  /** this is assigned to True */
+  /** Hardware repeat `count` time a `Bool`
+    * 
+    * @param count
+    * @return `Bits(count bits)`
+    */
+  override def #* (count : Int) : Bits = {
+    val node = new Operator.Bool.Repeat(count)
+    node.source = this.asInstanceOf[node.T]
+    val result = Bits(count bits)
+    result.assignFrom(node)
+    result.setAsTypeNode()
+    result
+  }
+
+  /** this is assigned to `True` */
   def set(): Unit = this := True
-  /** this is assigned to False */
+  /** this is assigned to `False` */
   def clear(): Unit = this := False
 
   /** Set to True.
@@ -255,6 +282,13 @@ class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[B
   private[core] override def isNotEqualTo(that: Any): Bool = {
     that match {
       case that: Bool => wrapLogicalOperator(that,new Operator.Bool.NotEqual);
+      case _          => SpinalError(s"Don't know how compare $this with $that"); null
+    }
+  }
+
+  private[core] override def isEqualToSim(that: Any): Bool = {
+    that match {
+      case that: Bool => wrapLogicalOperator(that,new Operator.Bool.EqualSim);
       case _          => SpinalError(s"Don't know how compare $this with $that"); null
     }
   }

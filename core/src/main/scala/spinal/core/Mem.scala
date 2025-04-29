@@ -103,6 +103,12 @@ object Mem {
   def apply[T <: Data](wordType: HardType[T], initialContent: Seq[T]) = new Mem(wordType, initialContent.length) init(initialContent)
   def apply[T <: Data](initialContent: Seq[T]) = new Mem(initialContent(0), initialContent.length) init(initialContent)
   def fill[T <: Data](wordCount: Int)(wordType: HardType[T])  = new Mem(wordType, wordCount)
+
+  def apply(wordType: AFix, initialContent: Seq[BigDecimal]) = {
+    val initSeq: Seq[BigInt] = initialContent.map(datum => BigInt((datum / wordType.Q.resolution).toLong))
+    val anyNegative: Boolean = initialContent.foldLeft(false)(_ || _ < 0.0)
+    new Mem(wordType, initSeq.length) initBigInt(initSeq, anyNegative)
+  }
 }
 
 
@@ -113,7 +119,7 @@ class MemWritePayload[T <: Data](dataType: T, addressWidth: Int) extends Bundle 
 
 object AllowPartialyAssignedTag extends SpinalTag
 object AllowMixedWidth extends SpinalTag
-trait MemPortStatement extends LeafStatement with StatementDoubleLinkedContainerElement[Mem[_], MemPortStatement] with Nameable {
+trait MemPortStatement extends LeafStatement with StatementDoubleLinkedContainerElement[Mem[_], MemPortStatement] with Nameable with SpinalTagReady {
   var isVital = false
   var mem: Mem[_] = null
 }
@@ -122,6 +128,7 @@ trait MemPortStatement extends LeafStatement with StatementDoubleLinkedContainer
 class Mem[T <: Data](val wordType: HardType[T], val wordCount: Int) extends DeclarationStatement with StatementDoubleLinkedContainer[Mem[_], MemPortStatement] with WidthProvider with SpinalTagReady with InComponent{
   if(parentScope != null) parentScope.append(this)
 
+  var preventMemToBlackboxTranslation = false
   var forceMemToBlackboxTranslation = false
   val _widths = wordType().flatten.map(t => t.getBitsWidth).toVector //Force to fix width of each wire
   val width   = _widths.sum
@@ -150,6 +157,10 @@ class Mem[T <: Data](val wordType: HardType[T], val wordCount: Int) extends Decl
     this
   }
 
+  def preventAsBlackBox(): this.type = {
+    preventMemToBlackboxTranslation = true
+    this
+  }
 
   override def getComponent(): Component = parentScope.component
 
@@ -198,21 +209,26 @@ class Mem[T <: Data](val wordType: HardType[T], val wordCount: Int) extends Decl
         val width   = _widths(elementId)
         val mask    = widthsMasks(elementId)
 
-        def walk(that: BaseType): Unit = that.head match {
-          case AssignmentStatement(_, literal: Literal) if element.hasOnlyOneStatement =>
-            val value = (((literal match {
-              case literal: EnumLiteral[_]   => elements(elementId).asInstanceOf[SpinalEnumCraft[_]].encoding.getValue(literal.senum)
-              case literal: BitVectorLiteral => {
-                if(literal.minimalValueBitWidth > width)
-                  SpinalError(s"MEM_INIT error, literal at intex $elementId is too big. 0x${literal.getValue().toString(16).toUpperCase()} => ${literal.minimalValueBitWidth} bits (more than $width bits)")
-                literal.getValue()
-              }
-              case literal: Literal          => literal.getValue()
-            }) & mask) << offset)
+        def walk(that: BaseType): Unit = 
+          if (that == null || that.head == null) {
+            SpinalError(s"Null value encountered in {$word}")
+          } else {
+            that.head match {
+            case AssignmentStatement(_, literal: Literal) if element.hasOnlyOneStatement =>
+              val value = (((literal match {
+                case literal: EnumLiteral[_]   => elements(elementId).asInstanceOf[SpinalEnumCraft[_]].encoding.getValue(literal.senum)
+                case literal: BitVectorLiteral => {
+                  if(literal.minimalValueBitWidth > width)
+                    SpinalError(s"MEM_INIT error, literal at intex $elementId is too big. 0x${literal.getValue().toString(16).toUpperCase()} => ${literal.minimalValueBitWidth} bits (more than $width bits)")
+                  literal.getValue()
+                }
+                case literal: Literal          => literal.getValue()
+              }) & mask) << offset)
 
-            builder += value
-          case AssignmentStatement(_, input : BaseType) if element.hasOnlyOneStatement  => walk(input)
-          case _ => SpinalError("ROM initial value should be provided from full literals value")
+              builder += value
+            case AssignmentStatement(_, input : BaseType) if element.hasOnlyOneStatement  => walk(input)
+            case other => SpinalError(s"ROM initial value should be provided from full literals value, got $other")
+          }
         }
         walk(element)
       }
@@ -302,7 +318,10 @@ class Mem[T <: Data](val wordType: HardType[T], val wordCount: Int) extends Decl
 
     val readPort = MemReadSync(this, address, data.getBitsWidth, if(enable != null) enable else True, readUnderWrite, ClockDomain.current)
     if(allowMixedWidth) readPort.addTag(AllowMixedWidth)
-    if(clockCrossing) readPort.addTag(crossClockDomain)
+    if(clockCrossing) {
+      readPort.addTag(crossClockDomain)
+      readPort.addTag(new crossClockMaxDelay(1, true))
+    }
 
     this.parentScope.append(readPort)
     this.dlcAppend(readPort)
@@ -407,7 +426,10 @@ class Mem[T <: Data](val wordType: HardType[T], val wordCount: Int) extends Decl
     val readBits = (if(allowMixedWidth) Bits() else Bits(getWidth bits))
 
     if(allowMixedWidth) readWritePort.addTag(AllowMixedWidth)
-    if(clockCrossing) readWritePort.addTag(crossClockDomain)
+    if(clockCrossing) {
+      readWritePort.addTag(crossClockDomain)
+      readWritePort.addTag(new crossClockMaxDelay(1, true))
+    }
 
     readBits.assignFrom(readWritePort)
     readWord.assignFromBits(readBits)
@@ -528,7 +550,7 @@ object MemReadAsync{
 }
 
 
-class MemReadAsync extends MemPortStatement with WidthProvider with SpinalTagReady with ContextUser with Expression{
+class MemReadAsync extends MemPortStatement with WidthProvider  with ContextUser with Expression{
 
   override def getWidth: Int = width
 
@@ -540,7 +562,7 @@ class MemReadAsync extends MemPortStatement with WidthProvider with SpinalTagRea
   def getWordsCount = mem.wordCount*mem.width/getWidth
   def getAddressWidth = log2Up(getWordsCount)
 
-  override def opName = "Mem.readAsync(x)"
+  override def opName = s"$mem.readAsync(x)"
 
   override def getTypeObject = TypeBits
 
@@ -601,7 +623,7 @@ object MemReadSync{
 }
 
 
-class MemReadSync() extends MemPortStatement with WidthProvider with SpinalTagReady with ContextUser with Expression {
+class MemReadSync() extends MemPortStatement with WidthProvider with ContextUser with Expression {
 
   var width          : Int = -1
   var address        : Expression with WidthProvider = null
@@ -669,6 +691,7 @@ class MemReadSync() extends MemPortStatement with WidthProvider with SpinalTagRe
   def aspectRatio = mem.getWidth/getWidth
 
   override def foreachClockDomain(func: (ClockDomain) => Unit): Unit = func(clockDomain)
+  override def remapClockDomain(func: ClockDomain => ClockDomain) = clockDomain = func(clockDomain)
 }
 
 
@@ -686,7 +709,7 @@ object MemWrite{
   }
 }
 
-class MemWrite() extends MemPortStatement with WidthProvider with SpinalTagReady {
+class MemWrite() extends MemPortStatement with WidthProvider{
   var width       : Int = -1
   var address     : Expression with WidthProvider = null
   var data        : Expression with WidthProvider = null
@@ -694,6 +717,8 @@ class MemWrite() extends MemPortStatement with WidthProvider with SpinalTagReady
   var writeEnable : Expression  = null
   var clockDomain : ClockDomain = null
 
+  def getMaskWidth(default : Int = 1) = if(mask != null) mask.getWidth else default
+  def getSymbolWidth = if(mask != null) width / mask.getWidth else 1
   def getWordsCount = mem.wordCount*mem.width/getWidth
   def getAddressWidth = log2Up(getWordsCount)
 
@@ -764,6 +789,7 @@ class MemWrite() extends MemPortStatement with WidthProvider with SpinalTagReady
   }
 
   override def foreachClockDomain(func: (ClockDomain) => Unit): Unit = func(clockDomain)
+  override def remapClockDomain(func: ClockDomain => ClockDomain) = clockDomain = func(clockDomain)
 }
 
 
@@ -785,7 +811,7 @@ object MemReadWrite {
 }
 
 
-class MemReadWrite() extends MemPortStatement with WidthProvider with SpinalTagReady  with ContextUser with Expression{
+class MemReadWrite() extends MemPortStatement with WidthProvider with ContextUser with Expression{
   var width        : Int = -1
   var address      : Expression with WidthProvider = null
   var data         : Expression with WidthProvider = null
@@ -796,6 +822,8 @@ class MemReadWrite() extends MemPortStatement with WidthProvider with SpinalTagR
   var readUnderWrite : ReadUnderWritePolicy = null
   var duringWrite : DuringWritePolicy = null
 
+  def getMaskWidth(default : Int = 1) = if(mask != null) mask.getWidth else default
+  def getSymbolWidth = if (mask != null) width / mask.getWidth else 1
   def getWordsCount = mem.wordCount*mem.width/getWidth
   def getAddressWidth = log2Up(getWordsCount)
 
@@ -866,6 +894,7 @@ class MemReadWrite() extends MemPortStatement with WidthProvider with SpinalTagR
   def aspectRatio = mem.getWidth / getWidth
 
   override def foreachClockDomain(func: (ClockDomain) => Unit): Unit = func(clockDomain)
+  override def remapClockDomain(func: ClockDomain => ClockDomain) = clockDomain = func(clockDomain)
 }
 
 case class MemSymbolesMapping(name : String, range: Range){

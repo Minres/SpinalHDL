@@ -7,7 +7,9 @@ import scala.math.BigDecimal.RoundingMode
 
 object AFix {
 
+  /** Constructs an AFix whose maximum and minimum values are maxRaw * 2^exp and minRaw * 2^exp, respectively. */
   def apply(maxRaw: BigInt, minRaw: BigInt, exp: ExpNumber) : AFix = new AFix(maxRaw = maxRaw, minRaw = minRaw, exp = exp.value)
+  /** Constructs an unsigned integer AFix with a maximum value. */
   def apply(u: UInt): AFix = AFix(u, 0 exp)
   def apply(u: UInt, exp: ExpNumber): AFix = {
     val maxValue = BigInt(2).pow(u.getWidth)-1
@@ -21,7 +23,9 @@ object AFix {
     ret
   }
 
+  /** Constructs an AFix which is driven to 0 or 1. */
   def apply(b: Bool): AFix = this(b, 0 exp)
+  /** Constructs an AFix which is driven to 0 or 2^exp. */
   def apply(b: Bool, exp : ExpNumber): AFix = {
     val ret = new AFix(1, 0, exp.value)
     ret.raw(0) := b
@@ -70,6 +74,13 @@ object AFix {
     new AFix(maxRaw, minRaw, resolution.value)
   }
 
+  def apply(Q: QFormat): AFix = {
+    val integerWidth = if (Q.signed) { Q.width - Q.fraction - 1 } else { Q.width - Q.fraction }
+    val fractionWidth = -Q.fraction
+    AFix(integerWidth exp, fractionWidth exp, Q.signed)
+  }
+
+  /** Create an unsigned integer AFix with a certain bit width */
   def U(width: BitCount): AFix = AFix(width.value exp, 0 exp, signed = false)
   def UQ(integerWidth: BitCount, fractionWidth: BitCount): AFix = AFix(integerWidth.value exp, -fractionWidth.value exp, signed = false)
   def U(amplitude: ExpNumber, width: BitCount): AFix = AFix(amplitude, (amplitude.value - width.value) exp, false)
@@ -86,6 +97,7 @@ object AFix {
 //      minimum*BigInt(2).pow(-resolution.value), resolution)
 //  }
 
+  /** Create an signed integer AFix with a certain bit width */
   def S(width: BitCount): AFix = AFix(width.value-1 exp, 0 exp, signed = true)
   def SQ(integerWidth: BitCount, fractionWidth: BitCount): AFix = AFix(integerWidth.value exp, -fractionWidth.value exp, signed = true)
   def S(amplitude: ExpNumber, width: BitCount): AFix = AFix(amplitude, (amplitude.value - width.value + 1) exp, true)
@@ -119,7 +131,7 @@ object AFix {
 }
 
 class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiData with Num[AFix] with BitwiseOp[AFix] with MinMaxDecimalProvider {
-  assert(maxRaw >= minRaw)
+  assert(maxRaw >= minRaw, s"maxRaw cannot be less than minRaw")
 
   val signed = (maxRaw < 0) || (minRaw < 0)
   val signWidth = if (signed) 1 else 0
@@ -133,22 +145,26 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
   private val minShifted = minRaw.abs - (if (minRaw < 0) signWidth else 0)
   private val minBits = minShifted.bitLength
 
-  // Number of bits to represent the entire value
+  /** Number of bits to represent the entire value */
   val bitWidth = Math.max(maxBits, minBits) + signWidth
-  // Number of bits to represent the fractional value
+  /** Number of bits to represent the fractional value. Zero if the resolution is integer or larger. */
   val fracWidth = Math.max(-exp, 0)
-  // Number of bits to represent the whole value, no sign
+  /** Number of bits to represent the whole value, without the sign bit. May be negative. */
   val wholeWidth = bitWidth - fracWidth - signWidth
-  // Number of bits to represent the whole ("integer") value, with sign
+  /** Number of bits to represent the whole ("integer") value, with sign. May be negative. */
   val intWidth = bitWidth - fracWidth
-  // Number of bits to represent the numeric value, no sign
+  /** Number of bits to represent the numeric value, no sign */
   val numWidth = bitWidth - signWidth
+
+  /** The exponent of the smallest power of 2 bounding the range of the AFix. */
+  val maxExp = exp + numWidth
+  val leftExp = exp + bitWidth
 
   val raw: Bits = Bits(bitWidth bit)
 
   // Representable range, range which could be represented by the backing bit vector
-  private val maxRepr = BigInt(2).pow(numWidth)
-  private val minRepr = BigInt(2).pow(numWidth)+1
+  private val maxRepr: BigInt = BigInt(2).pow(numWidth) - 1
+  private val minRepr: BigInt = if (signed) -BigInt(2).pow(numWidth) else 0
 
   raw.setRefOwner(this)
   raw.setPartialName("", weak = true)
@@ -180,23 +196,6 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
        r.minRaw*BigInt(2).pow(-expDiff))
     } else {
       (l.maxRaw, l.minRaw, r.maxRaw, r.minRaw)
-    }
-  }
-
-  /** Aligns representable ranges of two AFix numbers */
-  private def alignRangesRepr(l: AFix, r: AFix): (BigInt, BigInt, BigInt, BigInt) = {
-    val expDiff = l.exp - r.exp
-    // Scale left or right ranges if there's a difference in precision
-    if (expDiff > 0) {
-      (l.maxRepr*BigInt(2).pow(expDiff),
-        l.minRepr*BigInt(2).pow(expDiff),
-        r.maxRepr, r.minRepr)
-    } else if (expDiff < 0) {
-      (l.maxRepr, l.minRaw,
-        r.maxRepr*BigInt(2).pow(-expDiff),
-        r.minRepr*BigInt(2).pow(-expDiff))
-    } else {
-      (l.maxRepr, l.minRepr, r.maxRepr, r.minRepr)
     }
   }
 
@@ -438,10 +437,10 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     val _l = this.raw
     val _r = right.raw
     ret.raw := trim(((this.signed, right.signed) match {
-      case (false, false) => (_l.asUInt.resize(ret.bitWidth) * _r.asUInt)
-      case (false,  true) => (_l.asUInt.intoSInt             * _r.asSInt.resize(ret.bitWidth)).resize(ret.bitWidth)
-      case ( true, false) => (_l.asSInt.resize(ret.bitWidth) * _r.asUInt.intoSInt)
-      case ( true,  true) => (_l.asSInt.resize(ret.bitWidth) * _r.asSInt)
+      case (false, false) => (_l.asUInt * _r.asUInt)
+      case (false,  true) => (_l.asUInt.intoSInt * _r.asSInt)
+      case ( true, false) => (_l.asSInt * _r.asUInt.intoSInt)
+      case ( true,  true) => (_l.asSInt * _r.asSInt)
     }).asBits, ret.bitWidth)
 
     ret
@@ -580,7 +579,7 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     ret
   }
 
-  // Shift bits and decimal point right, adding padding bits left
+  // Shift bits and decimal point right, truncating bits on the right
   def >>|(shift: Int): AFix = {
     val shiftBig = BigInt(2).pow(shift)
     val ret = new AFix(this.maxRaw / shiftBig, this.minRaw / shiftBig, this.exp)
@@ -594,34 +593,46 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
   }
 
   def >>(shift: AFix): AFix = {
-    assert(shift.exp == 0)
-    assert(shift.minRaw == 0)
+    // TODO: should tolerate exp > 0
+    assert(shift.exp == 0, s"cannot shift by a fractional amount -- use an integer AFix")
+    // TODO: is this limitation necessary?
+    assert(shift.minRaw == 0, s"cannot shift by a negative amount -- use an unsigned AFix")
     val ret = new AFix(
       this.maxRaw * (BigInt(1) << shift.maxRaw.toInt),
       this.minRaw * (BigInt(1) << shift.maxRaw.toInt),
       (this.exp - shift.maxRaw.toInt)
     )
 
-    ret.raw := (this.raw << shift.maxRaw.toInt) >> U(shift)
+    if (this.signed)
+      ret.raw := ((this.raw << shift.maxRaw.toInt).asSInt >> U(shift)).asBits
+    else
+      ret.raw := (this.raw << shift.maxRaw.toInt) >> U(shift)
 
     ret
   }
 
   //Shift right, lose lsb bits
   def >>|(shift: AFix): AFix = {
-    assert(shift.exp == 0)
-    assert(shift.minRaw == 0)
+    // TODO: should tolerate exp > 0
+    assert(shift.exp == 0, s"cannot shift by a fractional amount -- use an integer AFix")
+    // TODO: is this limitation necessary?
+    assert(shift.minRaw == 0, s"cannot shift by a negative amount -- use an unsigned AFix")
     val ret = cloneOf(this)
 
-    ret.raw := this.raw >> U(shift)
+    if (this.signed)
+      ret.raw := (this.raw.asSInt >> U(shift)).asBits
+    else
+      ret.raw := this.raw >> U(shift)
 
     ret
   }
 
   //Shift left, lose MSB bits
   def |<<(shift: AFix): AFix = {
-    assert(shift.exp == 0)
-    assert(shift.minRaw == 0)
+    // TODO: should tolerate exp > 0
+    assert(shift.exp == 0, s"cannot shift by a fractional amount -- use an integer AFix")
+    // TODO: is this limitation necessary?
+    assert(shift.minRaw == 0, s"cannot shift by a negative amount -- use an unsigned AFix")
     val ret = cloneOf(this)
 
     ret.raw := this.raw |<< U(shift)
@@ -640,17 +651,23 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     ret
   }
 
+  override def <<(shift: UInt): AFix = ???
+  override def >>(shift: UInt): AFix = this >> AFix(shift)
+
   def unary_-(): AFix = negate(True)
 
   def negate(): AFix = negate(True)
   def negate(enable : Bool, plusOneEnable : Bool = null): AFix = {
     val ret = new AFix(-this.minRaw max this.maxRaw, -this.maxRaw min this.minRaw, this.exp)
-    ret.raw := U(this.raw).twoComplement(enable, plusOneEnable).asBits
+    if(this.minRaw >= 0)
+      ret.raw := U(this.raw).twoComplement(enable, plusOneEnable).asBits
+    else
+      ret.raw := S(this.raw).twoComplement(enable, plusOneEnable).asBits
     ret
   }
 
   def resize(newExp : ExpNumber): AFix ={
-    assert(newExp.value < exp) //for now
+    assert(newExp.value < exp, s"AFix resize loses precision -- use a rounding function instead") //for now
     val dif = exp - newExp.value
     val ret = new AFix(
       this.maxRaw * (BigInt(1) << dif),
@@ -674,36 +691,27 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
   def isZero() : Bool = raw === 0
 
   def asAlwaysPositive() : AFix = {
-    assert(signed)
+    assert(signed, s"this function is a no-op for unsigned numbers -- try truncating instead")
     val ret = AFix(maxRaw = maxRaw, minRaw = 0, exp = exp exp)
     ret := this.truncated
     ret
   }
 
+  def bitwiseOp(right: AFix, op: (Bits, Bits) => Bits): AFix = {
+    val ret = AFix(Math.max(maxExp, right.maxExp) exp, Math.min(exp, right.exp) exp, signed || right.signed)
+    val (lraw, rraw) = alignLR(this, right)
+    val lpad = if (signed) lraw.asSInt.resize(ret.bitWidth).asBits else lraw.resize(ret.bitWidth)
+    val rpad = if (right.signed) rraw.asSInt.resize(ret.bitWidth).asBits else rraw.resize(ret.bitWidth)
+    ret.raw := op(lpad, rpad)
+    ret
+  }
 
   /** Logical AND operator */
-  override def &(right: AFix): AFix = {
-    val (lMax, lMin, rMax, rMin) = alignRangesRepr(this, right)
-    val ret = new AFix(lMax.max(rMin), lMin.min(rMax), Math.min(this.exp, right.exp))
-    ret.raw := this.raw & right.raw
-    ret
-  }
-
+  override def &(right: AFix): AFix = bitwiseOp(right, _ & _)
   /** Logical OR operator */
-  override def |(right: AFix): AFix = {
-    val (lMax, lMin, rMax, rMin) = alignRangesRepr(this, right)
-    val ret = new AFix(lMax.max(rMin), lMin.min(rMax), Math.min(this.exp, right.exp))
-    ret.raw := this.raw | right.raw
-    ret
-  }
-
+  override def |(right: AFix): AFix = bitwiseOp(right, _ | _)
   /** Logical XOR operator */
-  override def ^(right: AFix): AFix = {
-    val (lMax, lMin, rMax, rMin) = alignRangesRepr(this, right)
-    val ret = new AFix(lMax.max(rMin), lMin.min(rMax), Math.min(this.exp, right.exp))
-    ret.raw := this.raw ^ right.raw
-    ret
-  }
+  override def ^(right: AFix): AFix = bitwiseOp(right, _ ^ _)
 
   /** Inverse bitwise operator */
   override def unary_~ : AFix = {
@@ -1053,9 +1061,10 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
 
   def fixTo(af: AFix, roundType: RoundType): AFix = this._round(roundType, af.exp).sat(af)
   def fixTo(af: AFix): AFix = this.fixTo(af, getTrunc.rounding)
-  def fixTo(Q: QFormat): AFix = {
-    val res = AFix(Q.width-Q.fraction exp, -Q.fraction exp, Q.signed)
-    res := this.fixTo(res)
+  def fixTo(Q: QFormat): AFix = this.fixTo(Q, getTrunc.rounding)
+  def fixTo(Q: QFormat, roundType: RoundType): AFix = {
+    val res = AFix(Q)
+    res := this.fixTo(res, roundType)
     res
   }
 
@@ -1146,6 +1155,12 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     }
   }
 
+  /** Convert the bits of the AFix into a UInt.
+    *
+    * Saturates if the AFix is negative.
+    *
+    * This is not a rounding operation; the exponent is ignored.
+    */
   def asUInt(): UInt = {
     if (this.signed) {
       val out = UInt(this.bitWidth bit)
@@ -1161,6 +1176,10 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     }
   }
 
+  /** Convert the bits of the AFix into a SInt.
+    *
+    * This is not a rounding operation; the exponent is ignored.
+    */
   def asSInt(): SInt = {
     if (this.signed) {
       this.raw.asSInt
@@ -1192,7 +1211,7 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
       (that * BigDecimal(BigInt(1) << shift)).toBigInt
     else
       (that / BigDecimal(BigInt(1) << -shift)).toBigInt
-    this.raw := value
+    this.raw := (if(value >= 0) value else (BigInt(1) << bitWidth) + value)
   }
 
   def init(that: BigDecimal): this.type = {
@@ -1223,6 +1242,14 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
 object AF {
   def apply(value: BigDecimal, integerWidth: BitCount, fractionWidth: BitCount, signed: Boolean): AFix = {
     val ret = if (signed) AFix.SQ(integerWidth, fractionWidth) else AFix.UQ(integerWidth, fractionWidth)
+    val tmp = cloneOf(ret)
+    tmp := value
+    ret.raw.assignFromBits(tmp.raw)
+    ret
+  }
+
+  def apply(value: BigDecimal, Q: QFormat): AFix = {
+    val ret = AFix(Q)
     val tmp = cloneOf(ret)
     tmp := value
     ret.raw.assignFromBits(tmp.raw)

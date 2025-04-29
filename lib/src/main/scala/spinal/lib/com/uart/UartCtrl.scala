@@ -77,7 +77,7 @@ class UartCtrl(g : UartCtrlGenerics = UartCtrlGenerics()) extends Component {
   io.uart.rxd <> rx.io.rxd
 
   io.readError := rx.io.error
-  tx.io.cts := (if(g.ctsGen) BufferCC(io.uart.cts) else False)
+  tx.io.cts := (if(g.ctsGen) BufferCC.withTag(io.uart.cts) else False)
   if(g.rtsGen) io.uart.rts := rx.io.rts
   io.readBreak := rx.io.break
   tx.io.break := io.writeBreak
@@ -191,10 +191,10 @@ object UartCtrl {
 }
 
 case class UartCtrlInitConfig(
-  baudrate : Int = 0,
-  dataLength : Int = 0,
-  parity : UartParityType.E = null,
-  stop : UartStopType.E = null
+  var baudrate : Int = 0,
+  var dataLength : Int = 0,
+  var parity : UartParityType.E = null,
+  var stop : UartStopType.E = null
 ){
   def initReg(reg : UartCtrlConfig): Unit ={
     require(reg.isReg)

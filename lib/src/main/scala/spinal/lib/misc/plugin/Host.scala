@@ -32,7 +32,13 @@ class PluginHost {
     b
   }
 
-  def addService(that: Any): Unit = services += that
+  def addService(that: Any): Unit = {
+    that match{
+      case cu : ContextUser => cu.parentScope = _context.get(DslScopeStack)
+      case _ =>
+    }
+    services += that
+  }
   def asHostOf(hostables: Seq[Hostable]) : Unit = hostables.foreach(_.setHost(this))
   def asHostOf(head : Hostable, tail: Hostable*) : Unit = asHostOf(head +: tail)
 
@@ -60,7 +66,15 @@ class PluginHost {
     }
   }
 
-  def find[T: ClassTag](filter : T => Boolean) = list[T].find(filter).get
+  def find[T: ClassTag](filter: T => Boolean) = findOption(filter).get
+  def findOption[T: ClassTag](filter: T => Boolean) = {
+    val flitred = list[T].filter(filter)
+    flitred.size match {
+      case 0 => None
+      case 1 => Some(flitred.head)
+    }
+
+  }
 }
 
 

@@ -173,7 +173,8 @@ class SpinalVpiBackendConfig[T <: Component](val rtl               : SpinalRepor
                                              val usePluginsCache  : Boolean,
                                              val pluginsCachePath : String,
                                              val enableLogging    : Boolean,
-                                             val timePrecision    : TimeNumber)
+                                             val timePrecision    : TimeNumber,
+                                             val testPath         : String)
 
 
 case class SpinalIVerilogBackendConfig[T <: Component](override val rtl : SpinalReport[T],
@@ -189,7 +190,8 @@ case class SpinalIVerilogBackendConfig[T <: Component](override val rtl : Spinal
                                                    override val usePluginsCache   : Boolean = true,
                                                    override val pluginsCachePath  : String = "./simWorkspace/.pluginsCachePath",
                                                    override val enableLogging     : Boolean = false,
-                                                   override val timePrecision     : TimeNumber = null) extends
+                                                   override val timePrecision     : TimeNumber = null,
+                                                   override val testPath          : String = null) extends
                                               SpinalVpiBackendConfig[T](rtl,
                                                                         waveFormat,
                                                                         workspacePath,
@@ -203,7 +205,8 @@ case class SpinalIVerilogBackendConfig[T <: Component](override val rtl : Spinal
                                                                         usePluginsCache,
                                                                         pluginsCachePath,
                                                                         enableLogging,
-                                                                        timePrecision)
+                                                                        timePrecision,
+                                                                        testPath)
 
 
 case class SpinalVCSBackendConfig[T <: Component](override val rtl : SpinalReport[T],
@@ -226,7 +229,8 @@ case class SpinalVCSBackendConfig[T <: Component](override val rtl : SpinalRepor
                                                   val compileFlags               : ArrayBuffer[String] = ArrayBuffer[String](),
                                                   val elaborateFlags             : ArrayBuffer[String] = ArrayBuffer[String](),
                                                   val vcsCC                      : Option[String] = None,
-                                                  val vcsLd                      : Option[String] = None) extends
+                                                  val vcsLd                      : Option[String] = None,
+                                                  override val testPath          : String = null) extends
   SpinalVpiBackendConfig[T](rtl,
     waveFormat,
     workspacePath,
@@ -240,7 +244,8 @@ case class SpinalVCSBackendConfig[T <: Component](override val rtl : SpinalRepor
     usePluginsCache,
     pluginsCachePath,
     enableLogging,
-    timePrecision)
+    timePrecision,
+    testPath)
 
 case class SpinalGhdlBackendConfig[T <: Component](override val rtl : SpinalReport[T],
                                                    override val waveFormat        : WaveFormat = WaveFormat.NONE,
@@ -255,7 +260,10 @@ case class SpinalGhdlBackendConfig[T <: Component](override val rtl : SpinalRepo
                                                    override val usePluginsCache   : Boolean = true,
                                                    override val pluginsCachePath  : String = "./simWorkspace/.pluginsCachePath",
                                                    override val enableLogging     : Boolean = false,
-                                                   override val timePrecision     : TimeNumber = null) extends
+                                                   override val timePrecision     : TimeNumber = null,
+                                                   val ghdlFlags : GhdlFlags = GhdlFlags(),
+                                                   override  val testPath         : String = null
+) extends
                                               SpinalVpiBackendConfig[T](rtl,
                                                                         waveFormat,
                                                                         workspacePath,
@@ -269,7 +277,8 @@ case class SpinalGhdlBackendConfig[T <: Component](override val rtl : SpinalRepo
                                                                         usePluginsCache,
                                                                         pluginsCachePath,
                                                                         enableLogging,
-                                                                        timePrecision)
+                                                                        timePrecision,
+                                                                        testPath)
 
 
 object SpinalGhdlBackend {
@@ -277,12 +286,16 @@ object SpinalGhdlBackend {
 
   def apply[T <: Component](config: SpinalGhdlBackendConfig[T]) : Backend = {
     val vconfig = new GhdlBackendConfig()
-    vconfig.analyzeFlags = config.simulatorFlags.mkString(" ")
-    if (config.timePrecision != null) {
-      vconfig.elaborationFlags = s"--time-resolution=${config.timePrecision.decompose._2}"
+    val flagsConcat = config.simulatorFlags.mkString(" ")
+    vconfig.analyzeFlags = flagsConcat
+    vconfig.elaborationFlags = config.ghdlFlags.elaborationFlags.mkString(" ") + {
+      if (config.timePrecision != null) {
+        s" --time-resolution=${config.timePrecision.decompose._2}"
+      } else ""
     }
     vconfig.runFlags = config.runFlags.mkString(" ")
     vconfig.logSimProcess = config.enableLogging
+    vconfig.testPath = config.testPath
 
     val signalsCollector = SpinalVpiBackend(config, vconfig)
 
@@ -298,6 +311,7 @@ object SpinalIVerilogBackend {
     vconfig.analyzeFlags = config.simulatorFlags.mkString(" ")
     vconfig.runFlags = config.simulatorFlags.mkString(" ")
     vconfig.logSimProcess = config.enableLogging
+    vconfig.testPath = config.testPath
     vconfig.timePrecision = config.timePrecision match {
       case null => null
       case t => t.decomposeString
@@ -320,8 +334,10 @@ object SpinalVCSBackend {
     vconfig.vcsCC = config.vcsCC
     vconfig.waveDepth = config.waveDepth
     vconfig.wavePath = config.wavePath
+    vconfig.wavePrefix = config.wavePrefix
     vconfig.simSetupFile = config.simSetupFile
     vconfig.envSetup = config.envSetup
+    vconfig.testPath = config.testPath
     vconfig.timePrecision = config.timePrecision match {
       case null => null
       case t => t.decomposeString
@@ -454,13 +470,13 @@ object SpinalXSimBackend {
     vconfig.xciSourcesPaths   =  xciSourcesPaths
     vconfig.bdSourcesPaths    = bdSourcesPaths
     vconfig.toplevelName      = rtl.toplevelName
-    vconfig.wavePath          = "test.wdb"
     vconfig.waveFormat        = waveFormat match {
       case WaveFormat.DEFAULT => WaveFormat.WDB
       case _ => waveFormat
     }
     vconfig.workspaceName     = workspaceName
     vconfig.workspacePath     = workspacePath
+    vconfig.wavePath          = s"${workspacePath}/${workspaceName}/${rtl.toplevelName}.wdb"
     vconfig.xilinxDevice      = xilinxDevice
     vconfig.userSimulationScript = simScript
     vconfig.xelabFlags        = simulatorFlags.toArray
@@ -683,7 +699,9 @@ case class SpinalSimConfig(
                             var _simScript         : String = null,
                             var _timePrecision     : TimeNumber = null,
                             var _timeScale         : TimeNumber = null,
-                            var _testPath          : String = "$WORKSPACE/$COMPILED"
+                            var _testPath          : String = "$WORKSPACE/$COMPILED/$TEST",
+                            var _waveFilePrefix    : String = null,
+                            var _ghdlFlags: GhdlFlags = GhdlFlags()
   ){
 
 
@@ -691,7 +709,12 @@ case class SpinalSimConfig(
     _backend = SpinalSimBackendSel.VERILATOR
     this
   }
-  def  withGhdl : this.type = {
+  def withGHDL(ghdlFlags: GhdlFlags = GhdlFlags()) = {
+    _ghdlFlags = ghdlFlags
+    withGhdl()
+  }
+
+  def  withGhdl() : this.type = {
     _backend = SpinalSimBackendSel.GHDL
     this
   }
@@ -813,6 +836,11 @@ case class SpinalSimConfig(
     this
   }
 
+  def waveFilePrefix(prefix: String): this.type = {
+    _waveFilePrefix = prefix
+    this
+  }
+
   def withConfig(config: SpinalConfig): this.type = {
     _spinalConfig = config
     this
@@ -880,6 +908,12 @@ case class SpinalSimConfig(
     this
   }
 
+  def withTimeSpec(timeScale: TimeNumber, timePrecision: TimeNumber): this.type = {
+    withTimeScale(timeScale)
+    withTimePrecision(timePrecision)
+    this
+  }
+
   def setTestPath(path : String) : this.type = {
     _testPath = path
     this
@@ -890,6 +924,12 @@ case class SpinalSimConfig(
   def withTestFolder : this.type = {
     this.setTestPath("$WORKSPACE/$COMPILED/$TEST")
     this
+  }
+
+  def addOptions(parser: scopt.OptionParser[Unit]): Unit = {
+    import parser._
+    opt[Unit]("trace-fst") action { (v, c) => this.withFstWave }
+    opt[Unit]("trace-vcd") action { (v, c) => this.withVcdWave }
   }
 
   def doSim[T <: Component](report: SpinalReport[T])(body: T => Unit): Unit = compile(report).doSim(body)
@@ -913,10 +953,14 @@ case class SpinalSimConfig(
   }
 
   def compileCloned[T <: Component](rtl: => T) : SimCompiled[T] = {
+    if (_workspacePath.startsWith("~"))
+      _workspacePath = System.getProperty("user.home") + _workspacePath.drop(1)
+
     val uniqueId = SimWorkspace.allocateUniqueId()
-    new File(s"tmp").mkdirs()
-    new File(s"tmp/job_$uniqueId").mkdirs()
-    val config = _spinalConfig.copy(targetDirectory = s"tmp/job_$uniqueId").addTransformationPhase(new PhaseNetlist {
+    new File(s"${_workspacePath}/tmp").mkdirs()
+    new File(s"${_workspacePath}/tmp/job_$uniqueId").mkdirs()
+    _spinalConfig.noAssertAtTimeZero = true
+    val config = _spinalConfig.copy(targetDirectory = s"${_workspacePath}/tmp/job_$uniqueId").addTransformationPhase(new PhaseNetlist {
       override def impl(pc: PhaseContext): Unit = {
         //Ensure the toplevel pull its clock domain
         pc.topLevel.rework{
@@ -939,10 +983,19 @@ case class SpinalSimConfig(
     val report = _backend match {
       case SpinalSimBackendSel.VERILATOR => {
         config.addTransformationPhase(new SimVerilatorPhase)
-        config.generateVerilog(rtl)
+        config.mode match {
+          case spinal.core.SystemVerilog => config.generateSystemVerilog(rtl)
+          case _ => config.generateVerilog(rtl)
+        }
       }
       case SpinalSimBackendSel.GHDL => config.generateVhdl(rtl)
-      case SpinalSimBackendSel.IVERILOG | SpinalSimBackendSel.VCS | SpinalSimBackendSel.XSIM => config.generateVerilog(rtl)
+      case SpinalSimBackendSel.VCS | SpinalSimBackendSel.XSIM => config.generateVerilog(rtl)
+      case SpinalSimBackendSel.IVERILOG => {
+        config.mode match {
+          case spinal.core.SystemVerilog => config.generateSystemVerilog(rtl)
+          case _ => config.generateVerilog(rtl)
+        }
+      }
     }
     report.blackboxesSourcesPaths ++= _additionalRtlPath
     report.blackboxesIncludeDir ++= _additionalIncludeDir
@@ -1010,7 +1063,7 @@ case class SpinalSimConfig(
           cachePath = if (!_disableCache) (if (_cachePath != null) _cachePath else s"${_workspacePath}/.cache") else null,
           workspacePath = s"${_workspacePath}/${_workspaceName}",
           vcdPath = wavePath,
-          vcdPrefix = null,
+          vcdPrefix = _waveFilePrefix,
           workspaceName = "verilator",
           waveDepth = _waveDepth,
           optimisationLevel = _optimisationLevel,
@@ -1038,7 +1091,7 @@ case class SpinalSimConfig(
           waveFormat = _waveFormat,
           workspacePath = s"${_workspacePath}/${_workspaceName}",
           wavePath = wavePath,
-          wavePrefix = null,
+          wavePrefix = _waveFilePrefix,
           workspaceName = "ghdl",
           waveDepth = _waveDepth,
           optimisationLevel = _optimisationLevel,
@@ -1046,14 +1099,16 @@ case class SpinalSimConfig(
           runFlags = _runFlags,
           enableLogging = _withLogging,
           usePluginsCache = !_disableCache,
-          timePrecision = _timePrecision
+          timePrecision = _timePrecision,
+          ghdlFlags = _ghdlFlags,
+          testPath = _testPath
         )
         val backend = SpinalGhdlBackend(vConfig)
         val deltaTime = (System.nanoTime() - startAt) * 1e-6
         println(f"[Progress] GHDL compilation done in $deltaTime%1.3f ms")
         new SimCompiled(report, compiledPath, this){
           override def newSimRaw(name: String, seed: Int): SimRaw = {
-            val raw = new SimVpi(backend)
+            val raw = new SimVpi(backend, name)
             raw.userData = backend.signals
             raw
           }
@@ -1062,26 +1117,37 @@ case class SpinalSimConfig(
       case SpinalSimBackendSel.IVERILOG =>
         println(f"[Progress] IVerilog compilation started")
         val startAt = System.nanoTime()
+        val additionalFlags = {
+          val stdConfigFlag = _simulatorFlags.find(_.startsWith("-g"))
+          if (stdConfigFlag.isEmpty && this._spinalConfig.mode == spinal.core.SystemVerilog) {
+            println(f"[Info] IVerilog set to use 2012 standard due to System Verilog being requested")
+            Seq("-g2012")
+          } else {
+            Seq()
+          }
+        }
+
         val vConfig = SpinalIVerilogBackendConfig[T](
           rtl = report,
           waveFormat = _waveFormat,
           workspacePath = s"${_workspacePath}/${_workspaceName}",
           wavePath = s"${_workspacePath}/${_workspaceName}",
-          wavePrefix = null,
+          wavePrefix = _waveFilePrefix,
           workspaceName = "iverilog",
           waveDepth = _waveDepth,
           optimisationLevel = _optimisationLevel,
-          simulatorFlags = _simulatorFlags,
+          simulatorFlags = _simulatorFlags ++ additionalFlags,
           enableLogging = _withLogging,
           usePluginsCache = !_disableCache,
-          timePrecision = _timePrecision
+          timePrecision = _timePrecision,
+          testPath = _testPath
         )
         val backend = SpinalIVerilogBackend(vConfig)
         val deltaTime = (System.nanoTime() - startAt) * 1e-6
         println(f"[Progress] IVerilog compilation done in $deltaTime%1.3f ms")
         new SimCompiled(report, compiledPath, this){
           override def newSimRaw(name: String, seed: Int): SimRaw = {
-            val raw = new SimVpi(backend)
+            val raw = new SimVpi(backend, name)
             raw.userData = backend.signals
             raw
           }
@@ -1093,7 +1159,7 @@ case class SpinalSimConfig(
           waveFormat = _waveFormat,
           workspacePath = s"${_workspacePath}/${_workspaceName}",
           wavePath = s"${_workspacePath}/${_workspaceName}",
-          wavePrefix = null,
+          wavePrefix = _waveFilePrefix,
           workspaceName = "vcs",
           waveDepth = _waveDepth,
           optimisationLevel = _optimisationLevel,
@@ -1110,7 +1176,7 @@ case class SpinalSimConfig(
         val backend = SpinalVCSBackend(vConfig)
         new SimCompiled(report, compiledPath, this) {
           override def newSimRaw(name: String, seed: Int): SimRaw = {
-            val raw = new SimVpi(backend)
+            val raw = new SimVpi(backend, name)
             raw.userData = backend.signals
             raw
           }

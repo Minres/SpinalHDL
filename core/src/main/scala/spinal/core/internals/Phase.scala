@@ -21,17 +21,16 @@
 package spinal.core.internals
 
 import java.io.{BufferedWriter, File, FileWriter}
-
 import scala.collection.mutable.ListBuffer
 import spinal.core._
-import spinal.core.fiber.Engine
+import spinal.core.fiber.{AsyncThread, Engine}
 import spinal.core.internals.Operator.BitVector
 
 import scala.collection.{immutable, mutable}
 import scala.collection.mutable.ArrayBuffer
 import spinal.core.internals._
-import java.util
 
+import java.util
 import scala.io.Source
 import scala.util.Random
 
@@ -114,6 +113,8 @@ class PhaseContext(val config: SpinalConfig) {
   }
 
   def sortedComponents = components().sortWith(_.level > _.level)
+
+  val svInterface = mutable.LinkedHashMap[String, StringBuilder]()
 
   def walkAll(func: Any => Unit): Unit = {
     GraphUtils.walkAllComponents(topLevel, c => {
@@ -258,6 +259,7 @@ class PhaseDeviceSpecifics(pc : PhaseContext) extends PhaseNetlist{
 //        if(hit) mem.addAttribute("ram_style", "distributed") //Vivado stupid ganbling workaround Synth 8-6430
 //      case _ =>
 //    }
+
   }
 }
 
@@ -386,38 +388,42 @@ class PhaseAnalog extends PhaseNetlist{
       //Process the islands to generate seeds from component analog inouts, and build the group list for connections without inout analog
       islands.foreach(island => {
         val filtred = island.elements.map(_.bt).toSet
-        val count = filtred.count(e => e.isInOut && e.component == c)
-        count match {
-          case 0 => { //No analog inout, will need to create a connection seed later on
-            val groups = island.elements.map(b => anlogToGroup.get(b.bt)).filter(_.nonEmpty).map(_.get).toArray.distinct
-            val finalGroup = groups.length match {
-              case 0 => {
-                val group = new Group()
-                analogGroups += group
-                group
-              }
-              case 1 => groups.head
-              case _ =>{
-                val ghead = groups.head
-                for(group <- groups.tail){
-                  groups.head.islands ++= group.islands
-                  analogGroups -= group
-                  for(i <- group.islands){
-                    for(b <- i.elements){
-                      anlogToGroup(b.bt) = ghead
-                    }
+        val count = filtred.count(e => e.isAnalog && e.component == c)
+        val ioCount = filtred.count(e => e.isInOut && e.component == c)
+        if(ioCount == 1) {
+          seeds += island.elements.find(e => e.bt.isInOut && e.bt.component == c).get.bt //Got a analog inout to host the connection
+        } else if(count == 1) {
+          seeds += island.elements.find(e => e.bt.isAnalog && e.bt.component == c).get.bt
+        } else if(count == 0){
+          //No analog, will need to create a connection seed later on
+          val groups = island.elements.map(b => anlogToGroup.get(b.bt)).filter(_.nonEmpty).map(_.get).toArray.distinct
+          val finalGroup = groups.length match {
+            case 0 => {
+              val group = new Group()
+              analogGroups += group
+              group
+            }
+            case 1 => groups.head
+            case _ =>{
+              val ghead = groups.head
+              for(group <- groups.tail){
+                groups.head.islands ++= group.islands
+                analogGroups -= group
+                for(i <- group.islands){
+                  for(b <- i.elements){
+                    anlogToGroup(b.bt) = ghead
                   }
                 }
-                ghead
               }
-            }
-            finalGroup.islands += island
-            for(b <- island.elements){
-              anlogToGroup(b.bt) = finalGroup
+              ghead
             }
           }
-          case 1 => seeds += island.elements.find(e => e.bt.isInOut && e.bt.component == c).get.bt //Got a analog inout to host the connection
-          case _ => PendingError("MULTIPLE INOUT interconnected in the same component"); null
+          finalGroup.islands += island
+          for(b <- island.elements){
+            anlogToGroup(b.bt) = finalGroup
+          }
+        } else {
+          PendingError("MULTIPLE INOUT interconnected in the same component")
         }
       })
 
@@ -724,7 +730,7 @@ trait PhaseMemBlackboxing extends PhaseNetlist {
     val mems      = mutable.LinkedHashSet[Mem[_]]()
 
     walkBaseNodes{
-      case mem: Mem[_] => mems += mem
+      case mem: Mem[_] if !mem.preventMemToBlackboxTranslation => mems += mem
       case ec: ExpressionContainer =>
         ec.foreachExpression{
           case port: MemPortStatement => consumers.getOrElseUpdate(port, ArrayBuffer[ExpressionContainer]()) += ec
@@ -733,8 +739,9 @@ trait PhaseMemBlackboxing extends PhaseNetlist {
       case _ =>
     }
     mems.foreach(mem => {
+      val topo = new MemTopology(mem, consumers)
       if(mem.addressWidth != 0 && mem.width != 0) {
-        doBlackboxing(pc, new MemTopology(mem, consumers))
+        doBlackboxing(pc, topo)
       } else if(mem.width != 0){
         def wrapConsumers(oldSource: Expression, newSource: Expression): Unit ={
           consumers.get(oldSource) match {
@@ -746,6 +753,10 @@ trait PhaseMemBlackboxing extends PhaseNetlist {
               }
             })
           }
+        }
+
+        if(!(topo.writes.nonEmpty || topo.readWriteSync.nonEmpty || topo.writeReadSameAddressSync.nonEmpty || mem.initialContent != null)) {
+          SpinalError(s"MEM-WITHOUT-DRIVER. $mem has no write ports nor initial content. Defined at :\n${mem.getScalaLocationLong}")
         }
 
         mem.component.rework{
@@ -872,6 +883,90 @@ abstract class PhaseMemBlackBoxingWithPolicy(policy: MemBlackboxingPolicy) exten
   def doBlackboxing(memTopology: MemTopology) : String
 }
 
+case class MemReadBufferTag(reg: BaseType, rs: MemPortStatement, through: List[BaseNode]) extends SpinalTag{
+  val enableScope = reg.head.parentScope
+  def enableCraft = {
+    reg.head.parentScope.on{
+      ConditionalContext.isTrue(reg.parentScope)
+    }
+  }
+}
+
+class MemReadBufferPhase extends PhaseNetlist {
+  override def impl(pc: PhaseContext): Unit = {
+    val algo = pc.globalData.allocateAlgoIncrementale()
+    val portsHits = ArrayBuffer[MemPortStatement]()
+    pc.walkDeclarations {
+      case reg: BaseType if reg.isReg && !reg.hasInit && reg.hasOnlyOneStatement => {
+        def walkStm(s: LeafStatement, through: List[BaseNode]): Unit = s match {
+          case s: DataAssignmentStatement if s.target.isInstanceOf[BaseType] =>
+            val target = s.target.asInstanceOf[BaseType]
+            if (through == Nil || s.parentScope == target.parentScope) {
+              walkExp(s.source, s :: through)
+            }
+          case _ =>
+        }
+
+        def walkExp(e: Expression, through: List[BaseNode]): Unit = e match {
+          case e: Cast => walkExp(e.input, e :: through)
+          case e: BitsRangedAccessFixed => walkExp(e.source, e :: through)
+          case bt: BaseType if bt.isComb && bt.hasOnlyOneStatement => walkStm(bt.head, bt :: through)
+          case rs: MemReadSync if reg.component == rs.component && reg.clockDomain == rs.clockDomain => {
+//            println(s"hit $rs through ${through.map(e => "- " + e).mkString("\n")}")
+            val hitId = portsHits.size
+            portsHits += rs
+            rs.addTag(new MemReadBufferTag(reg, rs, through))
+            through.foreach { bn =>
+              bn.algoIncrementale = algo
+              bn.algoInt = hitId
+            }
+          }
+          case _ =>
+        }
+
+        walkStm(reg.head.asInstanceOf[DataAssignmentStatement], Nil)
+      }
+      case _ =>
+    }
+
+    def clean(port: MemPortStatement): Unit = {
+      port.removeTags(port.getTags().filter(_.isInstanceOf[MemReadBufferTag]))
+    }
+
+    pc.walkStatements { s =>
+      if (s.algoIncrementale != algo) {
+        s.walkDrivingExpressions { e =>
+          if (e.algoIncrementale == algo) {
+//            println("Remove it")
+            val port = portsHits(e.algoInt)
+            clean(port)
+          }
+        }
+      }
+      s match {
+        case port: MemPortStatement => {
+          val tags = port.getTags().collect { case e: MemReadBufferTag => e }
+          if (tags.nonEmpty) {
+            val enableScope = tags.head.enableScope
+            val ok = tags.forall { self =>
+              if(self.enableScope == enableScope) true
+              else (enableScope.parentStatement, self.enableScope.parentStatement) match {
+                case (refWhen : WhenStatement, selfWhen : WhenStatement) =>
+                  refWhen.cond == selfWhen.cond
+                case _ => false
+              }
+            }
+            if (!ok) {
+              clean(port)
+            }
+          }
+        }
+        case _ =>
+      }
+    }
+  }
+}
+
 class MemBlackboxOf(val mem : Mem[Data]) extends SpinalTag
 class PhaseMemBlackBoxingDefault(policy: MemBlackboxingPolicy) extends PhaseMemBlackBoxingWithPolicy(policy){
   def doBlackboxing(topo: MemTopology): String = {
@@ -934,6 +1029,7 @@ class PhaseMemBlackBoxingDefault(policy: MemBlackboxingPolicy) extends PhaseMemB
         }
 
         for (rd <- topo.readsSync) {
+          val twoLatTags = rd.getTags().collect{case e : MemReadBufferTag => e }
           val ram = new Ram_1w_1rs(
             wordWidth = mem.getWidth,
             wordCount = mem.wordCount,
@@ -943,6 +1039,7 @@ class PhaseMemBlackBoxingDefault(policy: MemBlackboxingPolicy) extends PhaseMemB
             wrDataWidth = wr.data.getWidth,
             rdAddressWidth = rd.getAddressWidth,
             rdDataWidth = rd.getWidth,
+            rdLatency = twoLatTags.nonEmpty.mux(2, 1),
             wrMaskWidth = if (wr.mask != null) wr.mask.getWidth else 1,
             wrMaskEnable = wr.mask != null,
             readUnderWrite = rd.readUnderWrite,
@@ -961,7 +1058,38 @@ class PhaseMemBlackBoxingDefault(policy: MemBlackboxingPolicy) extends PhaseMemB
 
           ram.io.rd.en := wrapBool(rd.readEnable) && rd.clockDomain.isClockEnableActive
           ram.io.rd.addr.assignFrom(rd.address)
-          wrapConsumers(rd, ram.io.rd.data)
+          if(twoLatTags.isEmpty) {
+            wrapConsumers(rd, ram.io.rd.data)
+          } else {
+            ram.io.rd.dataEn := twoLatTags.head.enableCraft
+            for(t <- twoLatTags){
+              t.through.foreach{
+                case bt: BaseType if bt.parentScope != null => {
+                  bt.removeAssignments()
+                  bt.removeStatement()
+                }
+                case _ =>
+              }
+              t.reg.removeAssignments()
+              t.reg.setAsComb()
+//              t.reg.clearAll()
+              var ptrOld : Expression = rd
+              var ptrNew : Expression  = ram.io.rd.data
+              t.through.foreach{
+                case e : BaseType => ptrOld = e
+                case e : Expression => {
+                  e.remapDrivingExpressions{
+                    case x if x == ptrOld => ptrNew
+                    case x => x
+                  }
+                  ptrOld = e
+                  ptrNew = e
+                }
+                case _ =>
+              }
+              t.reg.assignFrom(ptrNew)
+            }
+          }
 
           ram.setName(mem.getName())
         }
@@ -1051,6 +1179,22 @@ class PhaseMemBlackBoxingDefault(policy: MemBlackboxingPolicy) extends PhaseMemB
     return null
   }
 }
+
+class PhaseMemBlackBoxingGeneric(policy: MemBlackboxingPolicy) extends PhaseMemBlackBoxingWithPolicy(policy){
+  def doBlackboxing(topo: MemTopology): String = {
+    if (topo.mem.initialContent != null) {
+      return "Can't blackbox ROM"
+    }
+
+    topo.mem.component.rework {
+      val bb = new Ram_Generic(topo, PhaseMemBlackBoxingGeneric.this)
+      removeMem(topo.mem)
+    }
+
+    return null
+  }
+}
+
 
 object classNameOf{
   def apply(that : Any): String = {
@@ -1216,6 +1360,39 @@ class PhasePullClockDomains(pc: PhaseContext) extends PhaseNetlist{
   override def impl(pc : PhaseContext): Unit = {
     import pc._
     walkComponents(c => PhasePullClockDomains.single(c))
+    if(pc.config.normalizeComponentClockDomainName) walkComponentsExceptBlackbox{c =>
+      val cd = c.clockDomain.get
+      if(cd != null){
+        if(cd.clock.component != c){
+          c.pulledDataCache.get(cd.clock).foreach{pin =>
+            if(pin.component == c){
+              pin.setName("clk")
+            }
+          }
+        }
+        if(cd.reset != null && cd.reset.component != c){
+          c.pulledDataCache.get(cd.reset).foreach{pin =>
+            if(pin.component == c){
+              pin.setName("reset" + (cd.config.resetActiveLevel == HIGH).mux("","n"))
+            }
+          }
+        }
+        if(cd.softReset != null && cd.softReset.component != c){
+          c.pulledDataCache.get(cd.softReset).foreach{pin =>
+            if(pin.component == c){
+              pin.setName("soft_reset" + (cd.config.softResetActiveLevel == HIGH).mux("","n"))
+            }
+          }
+        }
+        if(cd.clockEnable != null && cd.clockEnable.component != c){
+          c.pulledDataCache.get(cd.clockEnable).foreach{pin =>
+            if(pin.component == c){
+              pin.setName("clkEn" + (cd.config.softResetActiveLevel == HIGH).mux("","n"))
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -1347,46 +1524,115 @@ class PhaseInferEnumEncodings(pc: PhaseContext, encodingSwap: (SpinalEnumEncodin
   }
 }
 
+trait PhaseDeviceHandler{
+  // Some synthesis tools will mess things trying to infer async mem read into sync block ram
+  def onMemReadAsync(config : SpinalConfig, mem : Mem[_]) : Unit = {}
+  def onMemDontCareOrdering(config : SpinalConfig, mem : Mem[_]) : Unit = {}
+  def onCrossClockBuffer(config : SpinalConfig, that : BaseType) : Unit = {} // To help inferring low metastability
+  def onCrossClockMaxDelay(config: SpinalConfig, sources: Iterable[BaseType], target: BaseType) : Unit = {}
+}
+
+object PhaseDeviceDefault extends PhaseDeviceDefault
+class PhaseDeviceDefault extends PhaseDeviceHandler{
+  override def onMemReadAsync(config : SpinalConfig, mem: Mem[_]) = {
+    if(config.device.isVendorDefault || config.device.vendor == Device.XILINX.vendor) {
+      val alreadyTagged = mem.getTags().exists {
+        case a: AttributeString if a.getName == "ram_style" => true
+        case _ => false
+      }
+      if (!alreadyTagged) mem.addAttribute("ram_style", "distributed") //Vivado stupid gambling workaround Synth 8-6430
+    }
+  }
+
+  override def onCrossClockBuffer(config : SpinalConfig, bt: BaseType) = {
+    if(config.device.isVendorDefault || config.device.vendor == Device.XILINX.vendor) {
+      bt.addAttribute("async_reg", "true")
+    }
+  }
+
+  override def onMemDontCareOrdering(config : SpinalConfig, mem: Mem[_]) = {
+    if(config.device.vendor == Device.ALTERA.vendor){
+      mem.addAttribute("ramstyle", "no_rw_check")
+    }
+  }
+  override def onCrossClockMaxDelay(config: SpinalConfig, sources: Iterable[BaseType], target: BaseType) = {
+    if(config.device.isVendorDefault || config.device.vendor == Device.ALTERA.vendor){
+      val regAttribute = new AttributeString("altera_attribute", "-name ADV_NETLIST_OPT_ALLOWED NEVER_ALLOW")
+
+        sources.foreach(_.addAttribute(regAttribute))
+        target.addAttribute(regAttribute)
+    }
+  }
+}
+
 class PhaseDevice(pc : PhaseContext) extends PhaseMisc{
   override def impl(pc: PhaseContext): Unit = {
-    if(pc.config.device.isVendorDefault || pc.config.device.vendor == Device.XILINX.vendor) {
-      pc.walkDeclarations {
-        case mem: Mem[_] => {
-          var hit, withWrite = false
-          mem.foreachStatements {
-            case port: MemReadAsync => hit = true
-            case port: MemWrite => withWrite = true
-            case port: MemReadWrite => withWrite = true
-            case port: MemReadSync =>
-          }
-          val alreadyTagged = mem.getTags().exists{
-            case a : AttributeString if a.getName == "ram_style" => true
-            case _ => false
-          }
-          if (hit && withWrite && !alreadyTagged) mem.addAttribute("ram_style", "distributed") //Vivado stupid gambling workaround Synth 8-6430
+    val cb = pc.config.devicePhaseHandler
+    pc.walkDeclarations {
+      case mem: Mem[_] => {
+        var hit, withWrite = false
+        mem.foreachStatements {
+          case port: MemReadAsync => hit = true
+          case port: MemWrite => withWrite = true
+          case port: MemReadWrite => withWrite = true
+          case port: MemReadSync =>
         }
-        case bt: BaseType => {
-          if (bt.isReg && (bt.hasTag(crossClockDomain) || bt.hasTag(crossClockBuffer))) {
-            bt.addAttribute("async_reg", "true")
-          }
+        val alreadyTagged = mem.getTags().exists{
+          case a : AttributeString if a.getName == "ram_style" => true
+          case _ => false
         }
-        case _ =>
+        if (hit && withWrite) cb.onMemReadAsync(pc.config, mem)
+
+        var onlyDontCare = true
+        mem.dlcForeach(e => e match {
+          case port: MemWrite      =>
+          case port: MemReadWrite  => onlyDontCare &= port.readUnderWrite == dontCare
+          case port: MemReadSync   => onlyDontCare &= port.readUnderWrite == dontCare
+          case port: MemReadAsync  => onlyDontCare &= port.readUnderWrite == dontCare
+        })
+        if(onlyDontCare) cb.onMemDontCareOrdering(pc.config, mem)
       }
+      case bt: BaseType => {
+        if (bt.isReg && (bt.hasTag(crossClockDomain) || bt.hasTag(crossClockBuffer))) {
+          cb.onCrossClockBuffer(pc.config, bt)
+        }
+        if(bt.hasTag(classOf[crossClockMaxDelay])){
+          bt.dlcForeach ( statement =>
+            statement match {
+              case statement: DataAssignmentStatement => {
+                (statement.source, statement.target) match {
+                  case (source: BaseType, target: BaseType) =>
+                    val sources = seekRegDriver(source)
+                    cb.onCrossClockMaxDelay(pc.config, sources, target)
+                  case _ =>
+                }
+              }
+              case _ =>
+            }
+          )
+        }
+      }
+      case _ =>
     }
-    if(pc.config.device.vendor == Device.ALTERA.vendor){
-      pc.walkDeclarations {
-        case mem : Mem[_] => {
-          var onlyDontCare = true
-          mem.dlcForeach(e => e match {
-            case port: MemWrite      =>
-            case port: MemReadWrite  => onlyDontCare &= port.readUnderWrite == dontCare
-            case port: MemReadSync   => onlyDontCare &= port.readUnderWrite == dontCare
-            case port: MemReadAsync  => onlyDontCare &= port.readUnderWrite == dontCare
-          })
-          if(onlyDontCare) mem.addAttribute("ramstyle", "no_rw_check")
+    def seekRegDriver(that : BaseType): Iterable[BaseType] = {
+      var buffer = ArrayBuffer[BaseType]()
+      that.foreachStatements{ s =>
+        def forExp(e : Expression) : Unit = e match {
+          case s: Statement => s match {
+            case s: BaseType if !s.isReg => {buffer ++= seekRegDriver(s) }
+            case s: BaseType if s.isReg => buffer += s
+            case s =>
+          }
+          case e: MemReadSync =>
+          case e: MemReadWrite =>
+          case e: Expression => e.foreachDrivingExpression(forExp)
         }
-        case _ =>
+        s.walkParentTreeStatementsUntilRootScope{sParent =>
+          sParent.foreachDrivingExpression(forExp)
+        }
+        s.foreachDrivingExpression(forExp)
       }
+      buffer
     }
   }
 }
@@ -1604,13 +1850,50 @@ class PhaseCheckCrossClock() extends PhaseCheck{
 
   override def impl(pc : PhaseContext): Unit = {
     import pc._
-
     val solved = mutable.HashMap[Bool, immutable.Set[Bool]]()
     def areSynchronous(a : ClockDomain, b : ClockDomain): Boolean ={
       ClockDomain.areSynchronous(a,b,solved)
     }
 
 
+    def populateCdTag(that : BaseType): Unit = {
+      val cds = mutable.LinkedHashSet[ClockDomain]()
+      val walkedId = pc.globalData.allocateAlgoIncrementale
+      def walk(n : BaseNode): Unit = {
+        if(n.algoIncrementale == walkedId) return
+        n.algoIncrementale = walkedId
+        n match {
+          case node: SpinalTagReady if node.hasTag(classOf[ClockDomainTag]) =>
+            cds += node.getTag(classOf[ClockDomainTag]).get.clockDomain
+          case node: BaseType =>
+            if (node.isReg) {
+              cds += node.clockDomain
+            } else {
+              node.foreachStatements(s => walk(s))
+            }
+          case node: AssignmentStatement =>
+            node.foreachDrivingExpression(e => walk(e))
+            node.walkParentTreeStatementsUntilRootScope(s => walk(s))
+          case node: TreeStatement => node.foreachDrivingExpression(e => walk(e))
+          case node: Mem[_] => ???
+          case node: MemReadAsync => node.foreachDrivingExpression(e => walk(e))
+          case node: MemReadSync => cds += node.clockDomain
+          case node: MemReadWrite => cds += node.clockDomain
+          case node: Expression => node.foreachDrivingExpression(e => walk(e))
+        }
+      }
+
+      if(!that.isReg){
+        that.foreachStatements(walk)
+        for(cd <- cds) that.addTag(new ClockDomainReportTag(cd))
+      }
+    }
+
+    pc.topLevel.getAllIo.filter(_.isOutput).foreach(populateCdTag)
+    pc.walkComponents{
+      case bb : BlackBox if bb.isBlackBox => bb.getAllIo.filter(_.isInput).foreach(populateCdTag)
+      case _ =>
+    }
 
     walkStatements(s => {
       var walked = 0
@@ -1665,7 +1948,7 @@ class PhaseCheckCrossClock() extends PhaseCheck{
 
         //Add tag to the toplevel inputs and blackbox inputs as a report
         node match {
-          case bt : BaseType if bt.component == topLevel || bt.component.isInBlackBoxTree && !bt.isDirectionLess=> bt.addTag(ClockDomainReportTag(clockDomain))
+          case bt : BaseType if (bt.component == topLevel || bt.component.isInBlackBoxTree) && !bt.isDirectionLess => bt.addTag(ClockDomainReportTag(clockDomain))
           case _ =>
         }
 
@@ -1891,7 +2174,7 @@ class PhaseRemoveUselessStuff(postClockPulling: Boolean, tagVitals: Boolean) ext
     walkStatements{
       case s: BaseType => if((keepNamed || s.dontSimplify) && s.isNamed && (s.namePriority >= Nameable.USER_WEAK || s.isVital)) propagate(s, false)
       case s: DeclarationStatement => if(keepNamed && s.isNamed) propagate(s, false)
-      case s: AssertStatement      => if(s.kind == AssertStatementKind.ASSERT || pc.config.isSystemVerilog) propagate(s, false)
+      case s: AssertStatement      => if(s.kind == AssertStatementKind.ASSERT || pc.config.formalAsserts) propagate(s, false)
       case s: TreeStatement        =>
       case s: AssignmentStatement  =>
       case s: MemWrite             =>
@@ -2031,7 +2314,7 @@ class PhaseCheckIoBundle extends PhaseCheck{
   }
 }
 
-class PhaseCheckHiearchy extends PhaseCheck{
+class PhaseCheckHierarchy extends PhaseCheck{
 
   override def impl(pc: PhaseContext): Unit = {
     import pc._
@@ -2184,7 +2467,8 @@ class PhaseCheck_noRegisterAsLatch() extends PhaseCheck{
   }
 }
 
-class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck{
+class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck {
+  case class AssignmentInfo(bits: AssignedBits, lastLocation: Option[String])
 
   override def impl(pc : PhaseContext): Unit = {
     import pc._
@@ -2193,142 +2477,206 @@ class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck{
       val subInputsPerScope = mutable.HashMap[ScopeStatement, ArrayBuffer[BaseType]]()
       c.children.foreach(_.getAllIo.withFilter(_.isInput).foreach(input => subInputsPerScope.getOrElseUpdate(input.rootScopeStatement, ArrayBuffer[BaseType]()) += input))
 
-      def walkBody(body: ScopeStatement, checkOverlap : Boolean): mutable.HashMap[BaseType, AssignedBits] = {
-        val assigneds = mutable.HashMap[BaseType, AssignedBits]()
+      def walkBody(body: ScopeStatement, checkOverlap: Boolean): mutable.HashMap[BaseType, AssignmentInfo] = {
+        val assigneds = mutable.HashMap[BaseType, AssignmentInfo]()
 
-        def getOrEmpty(bt: BaseType) = assigneds.getOrElseUpdate(bt, new AssignedBits(bt.getBitsWidth))
+        // --- Helper Function for Updating Assignments and Checking Overlap ---
 
-        def getOrEmptyAdd(bt: BaseType, src: AssignedBits): Boolean = {
-          var dst : AssignedBits = null
-          var wasExisting = true
-          assigneds.get(bt) match {
-            case None => {
-              dst = new AssignedBits(bt.getBitsWidth)
-              assigneds(bt) = dst
-              wasExisting = false
-            }
-            case Some(x) => dst = x
+        /**
+         * Processes an assignment attempt for a BaseType.
+         * Updates the `assigneds` map for the current scope.
+         * Checks for full assignment overlaps during the `checkOverlap` phase.
+         *
+         * @param bt The BaseType being assigned.
+         * @param srcBits The bits being assigned in this operation.
+         * @param isFullAssignmentCheck Indicates if this operation *originates* from a statement that intends
+         *                              to be a full assignment (e.g., `a := ...`). This is used to decide
+         *                              if an overlap check should be triggered against prior assignments.
+         *                              Set to `false` when merging conditional results.
+         * @param currentLocation The source code location of the current assignment/statement.
+         */
+        def processAssignment(bt: BaseType, srcBits: AssignedBits, isFullAssignmentCheck: Boolean, currentLocation: String): Unit = {
+          val existingInfoOpt = assigneds.get(bt)
+          val wasExisting = existingInfoOpt.isDefined // Was there *any* prior assignment info in this scope?
+          val previousLocation = existingInfoOpt.flatMap(_.lastLocation) // Get location of the *last* modification
+
+          // Determine if an overlap error condition exists *before* modifying the bits.
+          // Overlap occurs if:
+          // 1. This is the overlap checking phase.
+          // 2. The current operation *originates* from a full assignment statement (isFullAssignmentCheck = true).
+          // 3. The source bits actually cover the entire width.
+          // 4. The signal was already assigned previously *within this scope*.
+          // 5. Overriding is not explicitly allowed via tag.
+          // *** NOTE: Merge results (isFullAssignmentCheck = false) do not trigger this check ***
+          val overlapDetected = checkOverlap &&
+                                isFullAssignmentCheck && // <<< Check relies on the origin of the operation
+                                srcBits.isFull &&
+                                wasExisting &&
+                                !bt.hasTag(allowAssignmentOverride)
+
+          // Report error if overlap detected
+          if (overlapDetected) {
+            PendingError(
+              s"ASSIGNMENT OVERLAP: Signal $bt assigned at\n" +
+              s"${currentLocation}\n" +
+              s"completely overlaps the previous assignment made at\n" + // Provide context of the conflicting assignment
+              s"${previousLocation.getOrElse("Unknown location or earlier scope")}" // Fallback if location is missing (should be rare)
+            )
           }
-          val ret = src.isFull && wasExisting &&  !bt.hasTag(allowAssignmentOverride)
-          dst.add(src)
-          ret
+
+          // Get the bits to modify:
+          // CRITICAL: Clone existing bits if they exist, because AssignedBits.add modifies in place.
+          // Otherwise, create new AssignedBits.
+          val dstBits = existingInfoOpt.map(_.bits.clone()).getOrElse(new AssignedBits(bt.getBitsWidth))
+
+          // Perform the 'add' operation (modifies the cloned or new dstBits in place)
+          dstBits.add(srcBits)
+
+          // Update the map with the modified bits and the *current* location as the new 'lastLocation'.
+          assigneds(bt) = AssignmentInfo(dstBits, Some(currentLocation))
         }
 
-        def getOrEmptyAdd3(bt: BaseType, hi: Int, lo: Int): Boolean = {
-          var dst : AssignedBits = null
-          var wasExisting = true
-          assigneds.get(bt) match {
-            case None => {
-              dst = new AssignedBits(bt.getBitsWidth)
-              assigneds(bt) = dst
-              wasExisting = false
-            }
-            case Some(x) => dst = x
-          }
-          val ret = hi == dst.width-1 && lo == 0 && wasExisting && !bt.hasTag(allowAssignmentOverride)
-          dst.add(hi, lo)
-          ret
-        }
+        // --- Statement Processing ---
 
-        def getOrEmptyAdd2(bt: BaseType, src: AssignedRange): Boolean = getOrEmptyAdd3(bt, src.hi, src.lo)
-        def noPoison(that : AssignmentStatement) = !checkOverlap || (that.source match {
-          case lit : Literal if lit.hasPoison() => false
+        // Helper to skip checks for assignments involving 'poison' literals during overlap check
+        def noPoison(that: AssignmentStatement): Boolean = !checkOverlap || (that.source match {
+          case lit: Literal if lit.hasPoison() => false
           case _ => true
         })
+
         body.foreachStatements {
-          case s: DataAssignmentStatement =>  //Omit InitAssignmentStatement
-            if(!s.finalTarget.isAnalog && noPoison(s)) {
+          case s: DataAssignmentStatement =>
+            if (!s.finalTarget.isAnalog && noPoison(s)) {
+              val location = s.getScalaLocationLong
               s.target match {
-                case bt: BaseType => if (getOrEmptyAdd3(bt, bt.getBitsWidth - 1, 0) && checkOverlap) {
-                  PendingError(s"ASSIGNMENT OVERLAP completely the previous one of $bt\n${s.getScalaLocationLong}")
-                }
+                case bt: BaseType =>
+                  val fullRangeBits = new AssignedBits(bt.getBitsWidth)
+                  fullRangeBits.add(bt.getBitsWidth - 1, 0)
+                  processAssignment(bt, fullRangeBits, isFullAssignmentCheck = true, location)
+
                 case e: BitVectorAssignmentExpression =>
                   val bt = e.finalTarget
-                  if (getOrEmptyAdd2(bt, e.getMinAssignedBits) && checkOverlap) {
-                    PendingError(s"ASSIGNMENT OVERLAP completely the previous one of $bt\n${s.getScalaLocationLong}")
-                  }
+                  val assignedRange = e.getMinAssignedBits
+                  val rangeBits = new AssignedBits(bt.getBitsWidth)
+                  rangeBits.add(assignedRange)
+                  val isEffectivelyFull = (assignedRange.hi == bt.getBitsWidth - 1) && (assignedRange.lo == 0)
+                  // Process, noting if it's effectively a full assignment, but crucially,
+                  // the *origin* is still a full assignment if isEffectivelyFull is true.
+                  processAssignment(bt, rangeBits, isEffectivelyFull, location)
               }
             }
+
           case s: WhenStatement =>
-            val whenTrue  = walkBody(s.whenTrue, checkOverlap)
-            val whenFalse = walkBody(s.whenFalse, checkOverlap)
+            val location = s.getScalaLocationLong
+            val whenTrueAssigneds = walkBody(s.whenTrue, checkOverlap)
+            val whenFalseAssigneds = walkBody(s.whenFalse, checkOverlap)
+            val keysUnion = whenTrueAssigneds.keySet ++ whenFalseAssigneds.keySet
 
-            for ((bt, assigned) <- whenTrue) {
-              whenFalse.get(bt) match {
-                case Some(otherBt) => getOrEmptyAdd(bt, otherBt.intersect(assigned))
-                case None => getOrEmpty(bt)
-              }
+            // Calculate the definite assignments (intersection)
+            for (bt <- keysUnion) {
+               (whenTrueAssigneds.get(bt), whenFalseAssigneds.get(bt)) match {
+                 case (Some(infoTrue), Some(infoFalse)) =>
+                   val intersectionBits = infoTrue.bits.clone().intersect(infoFalse.bits)
+                   if (!intersectionBits.isEmpty) {
+                     processAssignment(bt, intersectionBits, isFullAssignmentCheck = false, location)
+                   }
+                 case _ =>
+               }
             }
-            whenFalse.foreach(p => getOrEmpty(p._1))
+            // Ensure all signals touched within the branches are registered in the parent scope
+            // (important for latch detection pass), using the 'when' location if creating new.
+            keysUnion.foreach { bt =>
+                if (!assigneds.contains(bt)) {
+                   assigneds(bt) = AssignmentInfo(new AssignedBits(bt.getBitsWidth), Some(location))
+                }
+            }
+
           case s: SwitchStatement =>
-            val stuffs = if(s.isFullyCoveredWithoutDefault){
-              s.elements.map(e => walkBody(e.scopeStatement, checkOverlap))
-            } else if(s.defaultScope != null){
-              s.elements.map(e => walkBody(e.scopeStatement, checkOverlap)) += walkBody(s.defaultScope, checkOverlap)
-            } else {
-              s.elements.foreach(e => walkBody(e.scopeStatement, checkOverlap).foreach(e => getOrEmpty(e._1)))
-              null
-            }
+            val location = s.getScalaLocationLong
+            val branchBodies = s.elements.map(_.scopeStatement) ++ Option(s.defaultScope)
+            val branchAssignedsList = branchBodies.map(b => walkBody(b, checkOverlap))
 
-            if(stuffs != null) {
-              val mix = mutable.HashMap[BaseType, AssignedBits]()
-              for (stuff <- stuffs) {
-                for ((bt, assigned) <- stuff) {
-                  mix.update(bt, assigned)
-                }
-              }
+            if (branchAssignedsList.nonEmpty) {
+              val allTouchedSignals = mutable.HashSet[BaseType]()
+              branchAssignedsList.foreach(_.keys.foreach(allTouchedSignals += _))
 
-              for((bt, assigned) <- mix){
-                var continue = true
-                val iterator = stuffs.iterator
-                while(iterator.hasNext && continue){
-                  iterator.next().get(bt) match {
-                    case None => {
-                      assigned.clear()
-                      continue = false
-                    }
-                    case Some(branch) =>{
-                      assigned.intersect(branch)
-                    }
+              for (bt <- allTouchedSignals) {
+                  var intersectionForBt: Option[AssignedBits] = None
+                  var firstBranchBitsCloned: Option[AssignedBits] = None
+                  var possibleIntersection = true
+
+                  val relevantBranches = if (s.isFullyCoveredWithoutDefault || s.defaultScope != null) {
+                      branchAssignedsList
+                  } else {
+                      Seq.empty
                   }
-                }
+
+                  if (relevantBranches.nonEmpty) {
+                      val iterator = relevantBranches.iterator
+                      while(iterator.hasNext && possibleIntersection){
+                         val branchMap = iterator.next()
+                         branchMap.get(bt) match {
+                           case None =>
+                              possibleIntersection = false
+                           case Some(branchInfo) =>
+                              if (firstBranchBitsCloned.isEmpty) {
+                                 firstBranchBitsCloned = Some(branchInfo.bits.clone())
+                              } else {
+                                 firstBranchBitsCloned.get.intersect(branchInfo.bits)
+                              }
+                         }
+                      }
+                      intersectionForBt = firstBranchBitsCloned.filter(bits => possibleIntersection && !bits.isEmpty)
+                  }
+
+                  intersectionForBt.foreach { finalBits =>
+                    processAssignment(bt, finalBits, isFullAssignmentCheck = false, location)
+                  }
               }
 
-              for ((bt, assigned) <- mix) {
-                if(getOrEmptyAdd(bt,assigned) && checkOverlap){
-                  PendingError(s"ASSIGNMENT OVERLAP completely the previous one of $bt\n ${s.getScalaLocationLong}")
-                }
+              allTouchedSignals.foreach { bt =>
+                  if (!assigneds.contains(bt)) {
+                      assigneds(bt) = AssignmentInfo(new AssignedBits(bt.getBitsWidth), Some(location))
+                  }
               }
             }
           case s =>
         }
 
 
+        // --- Final Checks (Latch/No-Driver) --- performed only on the second pass (!checkOverlap)
         def finalCheck(bt : BaseType): Unit ={
           // Hold off until suffix parent is processed
           if (bt.isSuffix)
             return
           if (bt.isInstanceOf[Suffixable]) {
-            if (bt.dlcIsEmpty)
-              return bt.asInstanceOf[Suffixable].elements.filter(_._2.isInstanceOf[BaseType]).foreach(e => finalCheck(e._2.asInstanceOf[BaseType]))
+            if (bt.dlcIsEmpty) {
+              bt.asInstanceOf[Suffixable].elements
+                .filter(_._2.isInstanceOf[BaseType])
+                .foreach(e => finalCheck(e._2.asInstanceOf[BaseType]))
+              return
+            }
           }
 
-          val assignedBits = getOrEmpty(bt)
+          val assignmentInfo = assigneds.getOrElse(bt, AssignmentInfo(new AssignedBits(bt.getBitsWidth), None))
+          val assignedBits = assignmentInfo.bits
+
           if ((bt.isVital || !bt.dlcIsEmpty) && bt.rootScopeStatement == body && !assignedBits.isFull){
             if(bt.isComb) {
               val unassignedBits = new AssignedBits(bt.getBitsWidth)
-
               unassignedBits.add(bt.getBitsWidth - 1, 0)
               unassignedBits.remove(assignedBits)
 
               if (!unassignedBits.isEmpty) {
-                if (bt.dlcIsEmpty)
-                  PendingError(s"NO DRIVER ON $bt, defined at\n${bt.getScalaLocationLong}")
-                else if (!bt.hasTag(noLatchCheck)) {
+                if (bt.dlcIsEmpty) {
+                  if(!bt.hasTag(allowFloating)) {
+                    PendingError(s"NO DRIVER ON $bt (combinatorial signal with no logic connection), defined at\n${bt.getScalaLocationLong}")
+                  }
+                } else if (!bt.hasTag(noLatchCheck)) {
                   if (unassignedBits.isFull)
-                    PendingError(s"LATCH DETECTED from the combinatorial signal $bt, defined at\n${bt.getScalaLocationLong}")
+                    PendingError(s"LATCH DETECTED for the combinatorial signal $bt (no bits assigned), defined at\n${bt.getScalaLocationLong}")
                   else
-                    PendingError(s"LATCH DETECTED from the combinatorial signal $bt, unassigned bit mask " +
+                    PendingError(s"LATCH DETECTED for the combinatorial signal $bt, unassigned bit mask " +
                       s"is ${unassignedBits.toBinaryString}, defined at\n${bt.getScalaLocationLong}")
                 }
               }
@@ -2336,7 +2684,7 @@ class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck{
           }
         }
 
-        //Final checks usages
+
         if(!checkOverlap) {
           body.foreachDeclarations {
             case bt: BaseType => finalCheck(bt)
@@ -2347,13 +2695,13 @@ class PhaseCheck_noLatchNoOverride(pc: PhaseContext) extends PhaseCheck{
 
         assigneds
       }
-      walkBody(c.dslBody, true)
-      walkBody(c.dslBody, false)
+
+      walkBody(c.dslBody, checkOverlap = true)
+      walkBody(c.dslBody, checkOverlap = false)
+
     })
   }
 }
-
-
 
 class PhaseGetInfoRTL(prunedSignals: mutable.Set[BaseType], unusedSignals: mutable.Set[BaseType], counterRegisters: Ref[Int], blackboxesSourcesPaths: mutable.LinkedHashSet[String])(pc: PhaseContext) extends PhaseCheck {
 
@@ -2464,7 +2812,15 @@ class PhaseAllocateNames(pc: PhaseContext) extends PhaseMisc{
       else if (!c.definitionNameNoMerge)
         c.definitionName = globalScope.allocateName(c.definitionName)
     }
-    for (parent <- sortedComponents.reverse) {
+
+    val componentsReversed = ArrayBuffer[Component]()
+    def walk(c: Component): Unit = {
+      c.children.foreach(walk(_))
+      componentsReversed += c
+    }
+    walk(topLevel)
+
+    for (parent <- componentsReversed) {
       for(c <- parent.children) {
         allocate(c)
       }
@@ -2473,9 +2829,43 @@ class PhaseAllocateNames(pc: PhaseContext) extends PhaseMisc{
 
     globalScope.lockScope()
 
-    for (c <- sortedComponents.reverse) {
+    for (c <- componentsReversed) {
       c.allocateNames(pc.globalScope)
     }
+
+    val invalidVhdlIdentifier = List (
+      ("[^\\w]".r, "contains non-alphanumeric characters"),
+      ("_$".r, "ends with an underscore"),
+      ("__".r, "contains a double underscore"),
+      ("^[^a-zA-Z]".r, "doesn't start with a letter")
+    )
+    val invalidVerilogIdentifier = List (
+      ("[^\\w$]".r, "contains non-alphanumeric or dollar characters"),
+      ("^[^a-zA-Z_]".r, "doesn't start with a letter or underscore")
+    )
+    def checkName(namedObj: Nameable): Unit = {
+      var name = namedObj.getName()
+      if (!name.startsWith(pc.globalData.anonymSignalPrefix)) {
+        for ((regex, reason) <- invalidVhdlIdentifier) {
+          if (regex.findFirstIn(name).exists(_ => true)) {
+            val msg = s"Name of $namedObj is invalid in VHDL because it $reason."
+            if (pc.config.mode == VHDL) SpinalError(msg)
+            else SpinalWarning(msg)
+          }
+        }
+        for ((regex, reason) <- invalidVerilogIdentifier) {
+          if (regex.findFirstIn(name).exists(_ => true)) {
+            val msg = s"Name of $namedObj is invalid in (System)Verilog bacause it $reason."
+            if (pc.config.mode != VHDL) SpinalError(msg)
+            else SpinalWarning(msg)
+          }
+        }
+      }
+    }
+    pc.walkComponents( c => {
+      checkName(c)
+      c.dslBody.walkDeclarations( d => checkName(d) )
+    })
   }
 }
 
@@ -2554,7 +2944,7 @@ class PhaseCreateComponent(gen: => Component)(pc: PhaseContext) extends PhaseNet
       binarySequential
       binaryOneHot
       val top = gen
-      fiber.hardFork(ctx.globalData.elab.runSync()).setName("global_elab")
+      fiber.hardFork{AsyncThread.current.setName("spinal_elab"); ctx.globalData.elab.runSync()}.setName("spinal_elab")
       if(top.isInBlackBoxTree){
         SpinalError(s"The toplevel can't be a BlackBox (${top.getClass.getSimpleName})")
       }
@@ -2692,6 +3082,42 @@ class PhaseCheckAsyncResetsSources() extends PhaseCheck {
   }
 }
 
+class PhaseObfuscate() extends PhaseNetlist{
+  override def impl(pc: PhaseContext): Unit = {
+    var id = 0
+    def newName(): String = {
+      val name = "oo_" + id
+      id += 1
+      name
+    }
+    def renameT(that : Nameable with SpinalTagReady) : Unit = {
+      if(!that.hasTag(dontObfuscate)) that.setName(newName)
+    }
+    def rename(that : Nameable) : Unit = {
+     that.setName(newName)
+    }
+    if(pc.config.obfuscateNames){
+      pc.walkComponentsExceptBlackbox { c =>
+        if (c != pc.topLevel) {
+          renameT(c)
+          if(!c.definition.hasTag(dontObfuscate)) c.setDefinitionName(newName)
+        }
+        c.dslBody.walkDeclarations {
+          case io: BaseType if io.component == pc.topLevel && !io.isDirectionLess =>
+          case n: Nameable with SpinalTagReady => renameT(n)
+          case n: Nameable => rename(n)
+        }
+        for ((enu, enc) <- pc.enums) {
+          rename(enu)
+          for (e <- enu.elements) {
+            renameT(e)
+          }
+        }
+      }
+    }
+  }
+}
+
 object SpinalVhdlBoot{
   def apply[T <: Component](config : SpinalConfig)(gen : => T) : SpinalReport[T] ={
     if(config.debugComponents.nonEmpty){
@@ -2757,7 +3183,7 @@ object SpinalVhdlBoot{
     phases += new PhaseCollectAndNameEnum(pc)
 
     phases += new PhaseCheckIoBundle()
-    phases += new PhaseCheckHiearchy()
+    phases += new PhaseCheckHierarchy()
     phases += new PhaseAnalog()
     phases += new PhaseNextifyReg()
     phases += new PhaseRemoveUselessStuff(false, false)
@@ -2781,13 +3207,14 @@ object SpinalVhdlBoot{
     phases += new PhaseCheckCrossClock()
 
     phases += new PhasePropagateNames(pc)
+    phases += new PhaseObfuscate()
     phases += new PhaseAllocateNames(pc)
     phases += new PhaseDevice(pc)
 
     phases += new PhaseGetInfoRTL(prunedSignals, unusedSignals, counterRegister, blackboxesSourcesPaths)(pc)
     val report = new SpinalReport[T]()
     report.globalData = pc.globalData
-    phases += new PhaseDummy(SpinalProgress("Generate VHDL"))
+    phases += new PhaseDummy(SpinalProgress(s"Generate VHDL to ${config.targetDirectory}"))
     phases += new PhaseVhdl(pc, report)
 
     for(inserter <-config.phasesInserters){
@@ -2883,7 +3310,7 @@ object SpinalVerilogBoot{
     phases += new PhaseCollectAndNameEnum(pc)
 
     phases += new PhaseCheckIoBundle()
-    phases += new PhaseCheckHiearchy()
+    phases += new PhaseCheckHierarchy()
     phases += new PhaseAnalog()
     phases += new PhaseNextifyReg()
     phases += new PhaseRemoveUselessStuff(false, false)
@@ -2907,12 +3334,17 @@ object SpinalVerilogBoot{
     phases += new PhaseCheckCrossClock()
 
     phases += new PhasePropagateNames(pc)
+    phases += new PhaseObfuscate()
     phases += new PhaseAllocateNames(pc)
     phases += new PhaseDevice(pc)
 
+    if(config.mode == SystemVerilog && config.svInterface) {
+      phases += new PhaseInterface(pc)
+    }
+
     phases += new PhaseGetInfoRTL(prunedSignals, unusedSignals, counterRegister, blackboxesSourcesPaths)(pc)
 
-    phases += new PhaseDummy(SpinalProgress("Generate Verilog"))
+    phases += new PhaseDummy(SpinalProgress(s"Generate Verilog to ${config.targetDirectory}"))
 
     val report = new SpinalReport[T]()
     report.globalData = pc.globalData
@@ -2943,4 +3375,3 @@ object SpinalVerilogBoot{
     report
   }
 }
-

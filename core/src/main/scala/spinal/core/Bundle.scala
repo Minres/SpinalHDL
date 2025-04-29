@@ -27,24 +27,7 @@ import spinal.idslplugin.{Location, ValCallback}
 import scala.collection.mutable
 
 
-/**
-  * The Bundle is a composite type that defines a group of named signals (of any SpinalHDL basic type) under a single name.
-  * The Bundle can be used to model data structures, buses and interfaces.
-  *
-  * @example {{{
-  *     val cmd = new Bundle{
-  *       val init   = in Bool()
-  *       val start  = in Bool()
-  *       val result = out Bits(32 bits)
-  *     }
-  * }}}
-  *
-  * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/types/Bundle Bundle Documentation]]
-  */
-
-
-
-trait ValCallbackRec extends ValCallback{
+trait ValCallbackRec extends ValCallback {
 
 //  final override def valCallback(fieldRef: Any, name: String): Unit = {
 //    val refs = mutable.Set[Any]()
@@ -105,6 +88,21 @@ trait ValCallbackRec extends ValCallback{
   }
 }
 
+
+/**
+  * A `Bundle` is a composite type that defines a group of named signals (of any SpinalHDL basic type) under a single name.
+  * A `Bundle` can be used to model data structures, buses and interfaces.
+  *
+  * @example {{{
+  *     val cmd = new Bundle{
+  *       val init   = in Bool()
+  *       val start  = in Bool()
+  *       val result = out Bits(32 bits)
+  *     }
+  * }}}
+  *
+  * @see  [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Data%20types/bundle.html `Bundle` Documentation]]
+  */
 class Bundle extends MultiData with Nameable with ValCallbackRec {
 
   var hardtype: HardType[_] = null
@@ -164,6 +162,23 @@ class Bundle extends MultiData with Nameable with ValCallbackRec {
         bundleAssign(that)((to, from) => to.compositAssignFrom(from,to,kind))
       case _ => throw new Exception("Undefined assignment")
     }
+  }
+
+  /**
+    * for interface find modport
+    */
+  def checkDir(that: Bundle): Boolean = {
+    var ret= true
+    for ((name, element) <- elements) {
+      val other = that.find(name)
+      if (other == null)
+        LocatedPendingError(s"Bundle assignment is not complete. Missing $name")
+      else element match {
+        case b: Bundle => ret = b.checkDir(other.asInstanceOf[Bundle]) && ret
+        case b         => ret = (b.dir == other.dir) && ret
+      }
+    }
+    ret
   }
 
   var elementsCache = ArrayBuffer[(String, Data)]()

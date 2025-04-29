@@ -417,7 +417,7 @@ object Operator {
 
     class Changed extends UnaryOperator{
       override def getTypeObject = TypeBool
-      override def opName: String = "!$stable(...)"
+      override def opName: String = "$changed(...)"
     }
 
 
@@ -468,6 +468,17 @@ object Operator {
     class NotEqual extends BinaryOperator {
       override def getTypeObject = TypeBool
       override def opName: String = "Bool =/= Bool"
+    }
+
+    class EqualSim extends BinaryOperator {
+      override def getTypeObject = TypeBool
+      override def opName: String = "Bool =sim= Bool"
+    }
+
+    class Repeat(val count : Int) extends UnaryOperator with Widthable {
+      override def getTypeObject = TypeBits
+      override def opName: String = "Bool #* Int"
+      override def calcWidth: Int = count
     }
   }
 
@@ -583,6 +594,16 @@ object Operator {
       override def simplifyNode: Expression = {SymplifyNode.binaryThatIfBoth(new BoolLiteral(false))(this)}
     }
 
+    abstract class EqualSim extends BinaryOperatorWidthableInputs with ScalaLocated with SpinalTagReady {
+      override def getTypeObject = TypeBool
+      override def normalizeInputs: Unit
+      override def simplifyNode: Expression = {SymplifyNode.binaryThatIfBoth(new BoolLiteral(true))(this)}
+    }
+
+    abstract class Repeat(val count : Int) extends UnaryOperatorWidthableInputs {
+      override def calcWidth: Int = source.getWidth*count
+    }
+
     trait ShiftOperator
 
     abstract class ShiftRightByInt(val shift: Int) extends ConstantOperatorWidthableInputs with Widthable with ShiftOperator {
@@ -660,6 +681,12 @@ object Operator {
       override def simplifyNode: Expression = if(right.getWidth == 0) left else this
       override def toString() = s"(${super.toString()})[$getWidth bits]"
     }
+
+    class IsUnknown extends UnaryOperator {
+      override def opName: String = "$isunknown(Bits)"
+
+      override def getTypeObject: Any = TypeBool
+    }
   }
 
 
@@ -717,6 +744,21 @@ object Operator {
         right = InputNormalize.resizedOrUnfixedLit(right, targetWidth, new ResizeBits, left, this)
       }
       override def opName: String = "Bits =/= Bits"
+    }
+
+    class EqualSim extends BitVector.Equal {
+      override def normalizeInputs: Unit = {
+        val targetWidth = InferWidth.notResizableElseMax(this)
+        checkLiteralRanges(false)
+        left = InputNormalize.resizedOrUnfixedLit(left, targetWidth, new ResizeBits, right, this)
+        right = InputNormalize.resizedOrUnfixedLit(right, targetWidth, new ResizeBits, left, this)
+      }
+      override def opName: String = "Bits =sim= Bits"
+    }
+
+    class Repeat(count: Int) extends BitVector.Repeat(count) {
+      override def getTypeObject = TypeBits
+      override def opName: String = "Bits #* Int"
     }
 
     class ShiftRightByInt(shift: Int) extends BitVector.ShiftRightByInt(shift){
@@ -857,6 +899,22 @@ object Operator {
         left  = InputNormalize.resize(left, targetWidth, new ResizeUInt)
         right = InputNormalize.resize(right, targetWidth, new ResizeUInt)
       }
+    }
+
+    class EqualSim extends BitVector.Equal {
+      override def opName: String = "UInt =sim= UInt"
+      override def normalizeInputs: Unit = {
+        val targetWidth = InferWidth.notResizableElseMax(this)
+        checkLiteralRanges(false)
+        left  = InputNormalize.resize(left, targetWidth, new ResizeUInt)
+        right = InputNormalize.resize(right, targetWidth, new ResizeUInt)
+      }
+    }
+
+
+    class Repeat(count: Int) extends BitVector.Repeat(count) {
+      override def getTypeObject = TypeUInt
+      override def opName: String = "UInt #* Int"
     }
 
     class ShiftRightByInt(shift: Int) extends BitVector.ShiftRightByInt(shift) {
@@ -1005,6 +1063,21 @@ object Operator {
       }
     }
 
+    class EqualSim extends BitVector.EqualSim {
+      override def opName: String = "SInt =sim= SInt"
+      override def normalizeInputs: Unit = {
+        val targetWidth = InferWidth.notResizableElseMax(this)
+        checkLiteralRanges(true)
+        left  = InputNormalize.resize(left, targetWidth, new ResizeSInt)
+        right = InputNormalize.resize(right, targetWidth, new ResizeSInt)
+      }
+    }
+
+    class Repeat(count: Int) extends BitVector.Repeat(count) {
+      override def getTypeObject = TypeSInt
+      override def opName: String = "SInt #* Int"
+    }
+
     class ShiftRightByInt(shift: Int) extends BitVector.ShiftRightByInt(shift) {
       override def getTypeObject  = TypeSInt
       override def opName: String = "SInt >> Int"
@@ -1085,6 +1158,26 @@ object Operator {
           this
       }
     }
+
+    class EqualSim(var enumDef: SpinalEnum) extends BinaryOperator with InferableEnumEncodingImpl {
+      override def getTypeObject: Any = TypeBool
+
+      override def opName: String = "Enum =sim= Enum"
+      override def normalizeInputs: Unit = {InputNormalize.enumImpl(this)}
+
+      override type T = Expression with EnumEncoded
+      override private[core] def getDefaultEncoding(): SpinalEnumEncoding = enumDef.defaultEncoding
+      override def getDefinition: SpinalEnum = enumDef
+      override def swapEnum(e: SpinalEnum) = enumDef = e
+
+      override def simplifyNode: Expression = {
+        if (left.getDefinition.elements.size < 2)
+          new BoolLiteral(true)
+        else
+          this
+      }
+    }
+
   }
 }
 
@@ -1654,19 +1747,19 @@ abstract class BitVectorRangedAccessFixed extends SubAccess with WidthProvider{
 /** Bits range access with a fix range */
 class BitsRangedAccessFixed extends BitVectorRangedAccessFixed {
   override def getTypeObject  = TypeBits
-  override def opName: String = "Bits(Int downto Int)"
+  override def opName: String = s"Bits($hi downto $lo)"
 }
 
 /** UInt range access with a fix range */
 class UIntRangedAccessFixed extends BitVectorRangedAccessFixed {
   override def getTypeObject  = TypeUInt
-  override def opName: String = "UInt(Int downto Int)"
+  override def opName: String = s"UInt($hi downto $lo)"
 }
 
 /** SInt range access with a fix range */
 class SIntRangedAccessFixed extends BitVectorRangedAccessFixed {
   override def getTypeObject  = TypeSInt
-  override def opName: String = "SInt(Int downto Int)"
+  override def opName: String = s"SInt($hi downto $lo)"
 }
 
 
@@ -2292,6 +2385,17 @@ trait Literal extends Expression {
   //  override def addAttribute(attribute: Attribute): Literal.this.type = addTag(attribute)
 }
 
+object Literal{
+  def apply(that : Data) : BigInt = {
+    that match{
+      case bt : BaseType if bt.isComb && bt.dlcHasOnlyOne && bt.dlcHead.parentScope == bt.parentScope => bt.dlcHead match {
+        case das : DataAssignmentStatement if das.target == bt => das.source match {
+          case lit: Literal if !lit.hasPoison() => lit.getValue()
+        }
+      }
+    }
+  }
+}
 
 /**
   * Bits literal
@@ -2304,7 +2408,9 @@ object BitsLiteral {
     val minimalWidth   = Math.max(poisonBitCount,valueBitCount)
     var bitCount       = specifiedBitCount
 
-    if (value < 0) throw new Exception("literal value is negative and cannot be represented")
+    if (value < 0) {
+      throw new Exception("literal value is negative and cannot be represented")
+    }
 
     if (bitCount != -1) {
       if (minimalWidth > bitCount) throw new Exception(s"literal 0x${value.toString(16)} can't fit in Bits($specifiedBitCount bits)")
@@ -2456,10 +2562,14 @@ abstract class BitVectorLiteral() extends Literal with WidthProvider {
   }
 
   def hexString(bitCount: Int, aligin: Boolean = false):String = {
-    val hexCount = scala.math.ceil(bitCount/4.0).toInt
-    val alignCount = if (aligin) (hexCount * 4) else bitCount
-    val unsignedValue = if(value >= 0) value else ((BigInt(1) << alignCount) + value)
-    s"%${hexCount}s".format(unsignedValue.toString(16)).replace(' ','0')
+    if(value == 0){
+      "0"
+    } else {
+      val hexCount = scala.math.ceil(bitCount/4.0).toInt
+      val alignCount = if (aligin) (hexCount * 4) else bitCount
+      val unsignedValue = if(value >= 0) value else ((BigInt(1) << alignCount) + value)
+      s"%${hexCount}s".format(unsignedValue.toString(16)).replace(' ','0')
+    }
   }
 
 

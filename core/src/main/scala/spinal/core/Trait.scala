@@ -29,6 +29,8 @@ import scala.collection.mutable.{ArrayBuffer, Stack}
 import spinal.core.internals._
 import spinal.idslplugin.Location
 
+import scala.reflect.ClassTag
+
 trait DummyTrait
 object DummyObject extends DummyTrait
 
@@ -88,6 +90,12 @@ object SwitchStack extends ScopeProperty[SwitchContext]{
   override def default = null
 }
 
+object OnCreateStack extends ScopeProperty[Nameable => Unit]{
+  storeAsMutable = false
+  override def default = null
+}
+
+
 
 /**
   * Global data
@@ -96,6 +104,7 @@ class GlobalData(val config : SpinalConfig) {
 
   private var algoIncrementale = 1
   var toplevel : Component = null
+  var report : SpinalReport[Component] = null
 
   def allocateAlgoIncrementale(): Int = {
     assert(algoIncrementale != Integer.MAX_VALUE)
@@ -119,9 +128,8 @@ class GlobalData(val config : SpinalConfig) {
   val scalaLocatedComponents = mutable.HashSet[Class[_]]()
   val scalaLocateds = mutable.HashSet[ScalaLocated]()
   val elab = new Fiber()
-  elab.setName("global_elab")
-  elab.inflightLock.globalData = this
-  var onAreaInit = Option.empty[Area => Unit]
+  elab.setName("spinal_elab")
+//  elab.inflightLock.globalData = this
 
   def applyScalaLocated(): Unit ={
     try {
@@ -198,7 +206,7 @@ trait GlobalDataUser {
 }
 
 
-trait ContextUser extends GlobalDataUser with ScalaLocated{
+trait ContextUser extends GlobalDataUser with ScalaLocated {
   var parentScope : ScopeStatement = if(globalData != null) DslScopeStack.get else null
 
   def component: Component = if(parentScope != null) parentScope.component else null
@@ -222,23 +230,29 @@ trait NameableByComponent extends Nameable with GlobalDataUser {
       down = down.tail
       up = up.tail
     }
-    if(common != null)
+    val fullPath = if(common != null)
       (down.reverse :+ common) ++ up
     else
       down.reverse ++ up
+
+    // drop toplevel head for more consistent signal naming
+    fullPath match {
+      case h :: xs if h == globalData.toplevel => xs
+      case xs => xs
+    }
   }
 
   override def getName(default: String): String = {
 
     (getMode, nameableRef) match{
-      case (NAMEABLE_REF_PREFIXED, other : NameableByComponent) if other.component != null &&  this.component != other.component =>
-        val path = getPath(this.component, other.component) :+ nameableRef
+      case (NAMEABLE_REF_PREFIXED, other : NameableByComponent) if other.component != null && this.component != null && this.component != other.component =>
+        val path = getPath(this.component, other.component).tail :+ nameableRef
         if(path.forall(_.isNamed))
           path.map(_.getName()).mkString("_") + "_" + name
         else
           default
-      case (NAMEABLE_REF, other : NameableByComponent) if other.component != null &&  this.component != other.component =>
-        val path = getPath(this.component, other.component) :+ nameableRef
+      case (NAMEABLE_REF, other : NameableByComponent) if other.component != null && this.component != null && this.component != other.component =>
+        val path = getPath(this.component, other.component).tail :+ nameableRef
         if(path.forall(_.isNamed))
           path.map(_.getName()).mkString("_")
         else
@@ -248,13 +262,13 @@ trait NameableByComponent extends Nameable with GlobalDataUser {
   }
 
 
-  override def isNamed: Boolean = {
+  override def isUnnamed: Boolean = {
     (getMode, nameableRef) match{
-      case (NAMEABLE_REF_PREFIXED, other : NameableByComponent) if other.component != null &&  this.component != other.component =>
-        nameableRef.isNamed && getPath(this.component, other.component).forall(_.isNamed)
-      case (NAMEABLE_REF, other : NameableByComponent) if other.component != null && this.component != other.component =>
-        nameableRef.isNamed && getPath(this.component, other.component).forall(_.isNamed)
-      case _ => super.isNamed
+      case (NAMEABLE_REF_PREFIXED, other : NameableByComponent) if other.component != null && this.component != null && this.component != other.component =>
+        nameableRef.isUnnamed || getPath(this.component, other.component).tail.exists(_.isUnnamed)
+      case (NAMEABLE_REF, other : NameableByComponent) if other.component != null && this.component != null && this.component != other.component =>
+        nameableRef.isUnnamed || getPath(this.component, other.component).tail.exists(_.isUnnamed)
+      case _ => super.isUnnamed
     }
   }
 
@@ -350,7 +364,7 @@ object Nameable{
 }
 
 
-trait Nameable extends OwnableRef with ContextUser{
+trait Nameable extends OwnableRef with ContextUser {
   import Nameable._
 
   var name: String = null
@@ -374,7 +388,7 @@ trait Nameable extends OwnableRef with ContextUser{
     case OWNER_PREFIXED        => refOwner == null || refOwner.asInstanceOf[Nameable].isUnnamed
   }
 
-  def isNamed: Boolean = !isUnnamed
+  final def isNamed: Boolean = !isUnnamed
 
   def getName(): String = getName("")
   def getPartialName() : String = name
@@ -594,12 +608,14 @@ object ScalaLocated {
 
   def filterStackTrace(that: Array[StackTraceElement]) = that.filter(trace => {
     val className = trace.getClassName
-    !(className.startsWith("scala.") || className.startsWith("spinal.core") || !filter(trace.toString)) || ScalaLocated.unfiltredFiles.contains(trace.getFileName)
+    !(className.startsWith("scala.") || className.startsWith("spinal.core")  || className.startsWith("spinal.sim") || !filter(trace.toString)) || ScalaLocated.unfiltredFiles.contains(trace.getFileName)
   })
 
   def short(scalaTrace: Throwable): String = {
     if(scalaTrace == null) return "???"
-    filterStackTrace(scalaTrace.getStackTrace)(0).toString
+    val trace = filterStackTrace(scalaTrace.getStackTrace)
+    if(trace.isEmpty) return "???"
+    trace(0).toString
   }
 
   def filter(that: String): Boolean = {
@@ -614,13 +630,15 @@ object ScalaLocated {
   def long(scalaTrace: Throwable, tab: String = "    "): String = {
     if(scalaTrace == null) return "???"
 
-    filterStackTrace(scalaTrace.getStackTrace).map(_.toString).filter(filter).map(tab + _ ).mkString("\n") + "\n\n"
+    filterStackTrace(scalaTrace.getStackTrace).map(_.toString).filter(filter).
+      map(tab + "at " + _ ).mkString("\n") + "\n\n"
   }
 
   def long2(trace: Array[StackTraceElement], tab: String = "    "): String = {
     if(trace == null) return "???"
 
-    filterStackTrace(trace).map(_.toString).filter(filter).map(tab + _ ).mkString("\n") + "\n\n"
+    filterStackTrace(trace).map(_.toString).filter(filter).
+      map(tab + "at " + _ ).mkString("\n") + "\n\n"
   }
 
   def short: String = short(new Throwable())
@@ -651,6 +669,12 @@ trait SpinalTagReady {
 
   def addTags[T <: SpinalTag](tags: Iterable[T]): this.type = {
     for (tag <- tags) addTag(tag)
+    this
+  }
+
+  def addTags(h : SpinalTag, tail : SpinalTag*): this.type = {
+    addTag(h)
+    for (tag <- tail) addTag(tag)
     this
   }
 
@@ -717,6 +741,10 @@ trait SpinalTagReady {
   def filterTag(cond: (SpinalTag) => Boolean): Iterable[SpinalTag] = {
     if(_spinalTags == null) return Nil
     _spinalTags.filter(cond)
+  }
+
+  def getTagsOf[T <: SpinalTag]()(implicit tag: ClassTag[T]) : Iterable[T] = {
+    getTags().filter(tag.runtimeClass.isInstance(_)).map(_.asInstanceOf[T])
   }
 
   def addAttribute(attribute: Attribute): this.type = addTag(attribute)
@@ -788,7 +816,8 @@ class DefaultTag(val that: BaseType) extends SpinalTag
 object allowDirectionLessIoTag       extends SpinalTag
 object unsetRegIfNoAssignementTag    extends SpinalTag
 object allowAssignmentOverride       extends SpinalTag
-object allowOutOfRangeLiterals               extends SpinalTag{
+object allowFloating                 extends SpinalTag
+object allowOutOfRangeLiterals       extends SpinalTag{
   def apply(that : Bool) = doIt(that)
   def doIt(that : Bool) = {
     assert(that.dlcHasOnlyOne)
@@ -803,6 +832,7 @@ object allowOutOfRangeLiterals               extends SpinalTag{
   }
 }
 
+object dontObfuscate                 extends SpinalTag
 object noInit                        extends SpinalTag
 object unusedTag                     extends SpinalTag
 object noCombinatorialLoopCheck      extends SpinalTag
@@ -810,6 +840,16 @@ object noLatchCheck                  extends SpinalTag
 object noBackendCombMerge            extends SpinalTag
 object crossClockDomain              extends SpinalTag{ override def moveToSyncNode = true }
 object crossClockBuffer              extends SpinalTag{ override def moveToSyncNode = true }
+
+sealed trait TimingEndpointType
+object TimingEndpointType {
+  case object DATA extends TimingEndpointType
+  case object RESET extends TimingEndpointType
+  case object CLOCK_EN extends TimingEndpointType
+}
+
+case class crossClockFalsePath(source: Option[BaseType] = None, destType: TimingEndpointType = TimingEndpointType.DATA) extends SpinalTag { override def allowMultipleInstance: Boolean = false }
+case class crossClockMaxDelay(cycles: Int, useTargetClock: Boolean) extends SpinalTag { override def allowMultipleInstance: Boolean = false }
 object randomBoot                    extends SpinalTag{ override def moveToSyncNode = true }
 object tagAutoResize                 extends SpinalTag{ override def duplicative = true }
 object tagTruncated                  extends SpinalTag{
@@ -862,42 +902,46 @@ trait Num[T <: Data] {
     hpos downto lpos
   }
 
-  /** Addition */
+  /** Hardware addition */
   def + (right: T): T
-  /** Safe Addition with 1 bit expand */
+  /** Hardware safe addition with 1 bit expand */
   def +^(right: T): T
-  /** Safe Addition with saturation */
+  /** Hardware safe addition with saturation */
   def +| (right: T): T
-  /** Substraction */
+  /** Hardware subtraction */
   def - (right: T): T
-  /** Safe Substraction with 1 bit expand*/
+  /** Hardware safe subtraction with 1 bit expand */
   def -^ (right: T): T
-  /** Safe Substraction with saturation*/
+  /** Hardware safe subtraction with saturation */
   def -| (right: T): T
-  /** Multiplication */
+  /** Hardware multiplication */
   def * (right: T): T
-  /** Division */
+  /** Hardware division */
   def / (right: T): T
-  /** Modulo */
+  /** Hardware modulo */
   def % (right: T): T
 
-  /** Is less than right */
+  /** Hardware "is less than right" */
   def <  (right: T): Bool
-  /** Is equal or less than right */
+  /** Hardware  "is equal or less than right" */
   def <= (right: T): Bool
-  /** Is greater than right */
+  /** Hardware "is greater than right" */
   def >  (right: T): Bool
-  /** Is equal or greater than right */
+  /** Hardware "is equal or greater than right" */
   def >= (right: T): Bool
 
-  /** Logical left shift (w(T) = w(this) + shift)*/
+  /** Hardware arithmetic left shift (`w(T) = w(this) + shift`) */
   def << (shift: Int): T
-  /** Logical right shift (w(T) = w(this) - shift)*/
+  /** Hardware arithmetic right shift (`w(T) = w(this) - shift`) */
   def >> (shift: Int): T
+  /** Hardware arithmetic left shift (`w(T) = w(this) + (1 << shift)-1`) */
+  def << (shift: UInt): T
+  /** Hardware arithmetic right shift (`w(T) = w(this)`)*/
+  def >> (shift: UInt): T
 
-  /** Return the minimum value between this and right  */
+  /** Return the hardware minimum value between this and right  */
   def min(right: T): T = Mux(this < right, this.asInstanceOf[T], right)
-  /** Return the maximum value between this and right  */
+  /** Return the hardware maximum value between this and right  */
   def max(right: T): T = Mux(this < right, right, this.asInstanceOf[T])
 
   /** highest m bits Saturation Operation*/
@@ -937,13 +981,13 @@ trait Num[T <: Data] {
   */
 trait BitwiseOp[T <: Data]{
 
-  /** Logical AND operator */
+  /** Bitwise AND operator */
   def &(right: T): T
 
-  /** Logical OR operator */
+  /** Bitwise OR operator */
   def |(right: T): T
 
-  /** Logical XOR operator */
+  /** Bitwise XOR operator */
   def ^(right: T): T
 
   /** Inverse bitwise operator */

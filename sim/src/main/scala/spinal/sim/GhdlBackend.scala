@@ -1,11 +1,21 @@
 package spinal.sim
 
+import org.apache.commons.io.FileUtils
 import spinal.sim.vpi.SharedMemIface
 
 import java.io.{File, PrintWriter}
 import java.nio.file.{Files, Paths}
 import scala.sys.process._
+import scala.collection.mutable
 
+case class GhdlFlags(
+    elaborationFlags: mutable.ArrayBuffer[String] = mutable.ArrayBuffer[String]()
+) {
+  def withElaborationFlags(flags: String*): this.type = {
+    elaborationFlags.appendAll(flags)
+    this
+  }
+}
 
 class GhdlBackendConfig extends VpiBackendConfig {
   var ghdlPath: String = null
@@ -25,15 +35,6 @@ class GhdlBackend(config: GhdlBackendConfig) extends VpiBackend(config) {
   } else {
     println("Wave format " + waveFormat + " not supported by GHDL")
     WaveFormat.NONE
-  }
-
-  if (!(Array(WaveFormat.DEFAULT, WaveFormat.NONE) contains format)) {
-    wavePath = wavePath.split('.').init ++ Seq(format.ext) mkString "."
-    if (format == WaveFormat.GHW) {
-      runFlags += " --wave=" + wavePath
-    } else {
-      runFlags += " --" + format.ext + "=" + wavePath
-    }
   }
 
   if (ghdlPath == null) ghdlPath = "ghdl"
@@ -87,7 +88,7 @@ class GhdlBackend(config: GhdlBackendConfig) extends VpiBackend(config) {
     )
   }
 
-  def runSimulation(sharedMemIface: SharedMemIface): Thread = {
+  def runSimulation(sharedMemIface: SharedMemIface, testName: String): Thread = {
     val vpiModulePath =
       if (!isWindows) pluginsPath + "/" + vpiModuleName
       else (pluginsPath + "/" + vpiModuleName).replaceAll("/C", raw"C:").replaceAll(raw"/", raw"\\")
@@ -102,6 +103,20 @@ class GhdlBackend(config: GhdlBackendConfig) extends VpiBackend(config) {
     val thread = new Thread(new Runnable {
       val iface = sharedMemIface
       def run(): Unit = {
+        val waveFileDir = Paths.get(System.getProperty("user.dir"), config.testPath.replace("$TEST",testName)).toAbsolutePath.normalize()
+        val waveFile = f"${waveFileDir}/wave.${config.waveFormat.ext}"
+        var waveArgString = ""
+        if (!(Array(WaveFormat.DEFAULT, WaveFormat.NONE) contains format)) {
+          if (format == WaveFormat.GHW) {
+            waveArgString = " --wave=" + waveFile
+          } else {
+            waveArgString = " --" + format.ext + "=" + waveFile
+          }
+        }
+        if (waveArgString != "") {
+          FileUtils.forceMkdirParent(new File(waveFileDir.toString, "."))
+        }
+
         val retCode = Process(
           Seq(
             ghdlPath,
@@ -110,6 +125,7 @@ class GhdlBackend(config: GhdlBackendConfig) extends VpiBackend(config) {
             "-fsynopsys",
             toplevelName,
             s"--vpi=${pwd + "/" + vpiModulePath}",
+            waveArgString,
             runFlags
           ).mkString(" "),
           new File(workspacePath),

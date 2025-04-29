@@ -1,8 +1,8 @@
 package spinal.lib.misc.pipeline
 
-import spinal.core.Nameable
-import scala.collection.Seq
-import scala.collection.mutable
+import spinal.core._
+
+import scala.collection.{Seq, mutable}
 import scala.collection.mutable.ArrayBuffer
 
 object Builder {
@@ -20,7 +20,7 @@ object Builder {
           e.propagateDown()
           for (d <- e.downs) {
             solved += d
-            if (d.down != null && d.down.ups.forall(u => solved.contains(u))) {
+            if (d.down != null && d.down.ups.forall(u => solved.contains(u) || u.up == null)) {
               seeds += d.down
             }
           }
@@ -40,7 +40,7 @@ object Builder {
           e.propagateUp()
           for (d <- e.ups) {
             solved += d
-            if (d.up != null && d.up.downs.forall(u => solved.contains(u))) {
+            if (d.up != null && d.up.downs.forall(u => solved.contains(u) || u.down == null)) {
               seeds += d.up
             }
           }
@@ -58,7 +58,7 @@ object Builder {
   }
 }
 
-class NodesBuilder() extends Nameable {
+class NodesBuilder() extends Area {
   val nodes = ArrayBuffer[Node]()
   val connectors = ArrayBuffer[Link]()
 
@@ -71,6 +71,40 @@ class NodesBuilder() extends Nameable {
       connectors += StageLink(up, down).setCompositeName(this, "connector")
     }
     Builder(connectors)
+  }
+}
+
+class StagePipeline() extends Area {
+  val nodes = mutable.LinkedHashMap[Int, Node]()
+  val links = mutable.ArrayBuffer[StageLink]()
+
+  def apply(i : Int) = node(i)
+  def node(i : Int) = nodes.getOrElseUpdate(i, new Node().setCompositeName(this, s"node_${i.toString}"))
+  class Area(i : Int) extends NodeMirror(node(i)) with spinal.core.Area
+
+  def build(withoutCollapse : Boolean = false): Unit = {
+    for(i <- nodes.keys.min until nodes.keys.max){
+      val stage = StageLink(node(i), node(i+1)).setCompositeName(this, s"stage_${i+1}")
+      if(withoutCollapse) stage.withoutCollapse()
+      links += stage
+    }
+    Builder(links)
+  }
+}
+
+class StageCtrlPipeline() extends Area {
+  val ctrls = mutable.LinkedHashMap[Int, CtrlLink]()
+  val links = mutable.ArrayBuffer[StageLink]()
+
+  def ctrl(i : Int) = ctrls.getOrElseUpdate(i, CtrlLink().setCompositeName(this, s"ctrl_${i.toString}"))
+  class Ctrl(i : Int) extends CtrlLinkMirror(ctrl(i))
+  class InsertArea extends NodeMirror(ctrl(0).up) with spinal.core.Area
+
+  def build(): Unit = {
+    for(i <- ctrls.keys.min until ctrls.keys.max){
+      links += StageLink(ctrl(i).down, ctrl(i+1).up).setCompositeName(this, s"stage_${i+1}")
+    }
+    Builder(links ++ ctrls.values)
   }
 }
 

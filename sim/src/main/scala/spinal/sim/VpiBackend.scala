@@ -10,6 +10,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.sys.process._
+import scala.util.Properties
 
 import spinal.sim.vpi._
 
@@ -21,16 +22,18 @@ case class VpiBackendConfig(
   var workspacePath: String  = null,
   var workspaceName: String  = null,
   var wavePath: String       = null,
+  var wavePrefix: String     = null,
   var waveFormat: WaveFormat = WaveFormat.NONE,
   var analyzeFlags: String   = "",
   var runFlags: String       = "",
   var sharedMemSize: Int     = 65536,
   var CC: String             = "g++",
-  var CFLAGS: String         = "-std=c++11 -Wall -Wextra -pedantic -O2 -Wno-strict-aliasing -Wno-write-strings", 
+  var CFLAGS: String         = "-std=c++14 -Wall -Wextra -pedantic -O2 -Wno-strict-aliasing -Wno-write-strings", 
   var LDFLAGS: String        = "-lpthread ", 
   var useCache: Boolean      = false,
   var logSimProcess: Boolean = false,
-  var timePrecision: String  = null
+  var timePrecision: String  = null,
+  var testPath: String       = null
 )
 
 abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
@@ -40,7 +43,7 @@ abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
   val pluginsPath     = config.pluginsPath     
   val workspacePath   = config.workspacePath   
   val workspaceName   = config.workspaceName   
-  var wavePath        = config.wavePath        
+  val wavePath        = config.wavePath
   val waveFormat      = config.waveFormat      
   val analyzeFlags    = config.analyzeFlags
   var runFlags        = config.runFlags        
@@ -93,8 +96,8 @@ abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
 
   class Logger extends ProcessLogger {
     val logs = new StringBuilder()
-    override def err(s: => String): Unit = { logs ++= (s) }
-    override def out(s: => String): Unit = { logs ++= (s) }
+    override def err(s: => String): Unit = { logs ++= (s ++ Properties.lineSeparator) }
+    override def out(s: => String): Unit = { logs ++= (s ++ Properties.lineSeparator) }
     override def buffer[T](f: => T) = f
   }
 
@@ -167,9 +170,9 @@ abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
 
   def compileVPI() : Unit   // Return the plugin name
   def analyzeRTL() : Unit
-  def runSimulation(sharedMemIface: SharedMemIface) : Thread
+  def runSimulation(sharedMemIface: SharedMemIface, testName: String) : Thread
 
-  def instanciate_() : (SharedMemIface, Thread) = {
+  def instanciate_(name: String) : (SharedMemIface, Thread) = {
     delayed_compilation
     val shmemKey = Seq("SpinalHDL",
       runIface.toString,
@@ -185,19 +188,19 @@ abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
     var shmemFile = new PrintWriter(new File(workspacePath + "/shmem_name"))
     shmemFile.write(shmemKey) 
     shmemFile.close
-    val thread = runSimulation(sharedMemIface)
+    val thread = runSimulation(sharedMemIface, name)
     sharedMemIface.check_ready 
     (sharedMemIface, thread)
   }
 
-  def instanciate(seed : Long) : (SharedMemIface, Thread) = {
+  def instanciate(name: String, seed : Long) : (SharedMemIface, Thread) = {
     val ret = if(useCache) {
       VpiBackend.synchronized {
-        instanciate_()
+        instanciate_(name)
       }
     } else {
       this.synchronized {
-        instanciate_()
+        instanciate_(name)
       }
     }
     ret._1.set_seed(seed)
@@ -205,7 +208,7 @@ abstract class VpiBackend(val config: VpiBackendConfig) extends Backend {
     ret
   }
 
-  def instanciate() : (SharedMemIface, Thread) = instanciate(0x5EED5EED)
+  def instanciate(name: String) : (SharedMemIface, Thread) = instanciate(name, 0x5EED5EED)
 }
 
 object VpiBackend {}

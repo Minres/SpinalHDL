@@ -6,8 +6,9 @@ import spinal.lib._
 import spinal.lib.formal._
 
 class FormalHistoryModifyableTester extends SpinalFormalFunSuite {
-  test("pop_any") {
+  def testMain(backend: FormalBackend) {
     FormalConfig
+      .withBackend(backend)
       .withBMC(10)
       .withProve(10)
       .withCover(10)
@@ -16,7 +17,7 @@ class FormalHistoryModifyableTester extends SpinalFormalFunSuite {
         val outOnly = false
         val depth = 4
         val input = anyseq(Flow(UInt(6 bits)))
-        val dut = HistoryModifyable(input, depth)
+        val dut = FormalDut(HistoryModifyable(input, depth))
         val results = Vec(master(Stream(input.payloadType)), depth)
         val controls = Vec(slave(Stream(input.payloadType)), depth)
         dut.io.outStreams.zip(results).map { case (from, to) => from >> to }
@@ -39,7 +40,7 @@ class FormalHistoryModifyableTester extends SpinalFormalFunSuite {
         )
         val overflowModify = controls.sExist(x => x.fire && x.payload === dataOverflow)
         val overflowCount = outCount(dataOverflow)
-        when(past(dut.io.willOverflow && results.last.payload === dataOverflow && !overflowModify)) {
+        when(pastValidAfterReset && past(dut.io.willOverflow && results.last.payload === dataOverflow && !overflowModify)) {
           assert(results.last.valid && past(overflowCount) > overflowCount)
         }
 
@@ -56,7 +57,7 @@ class FormalHistoryModifyableTester extends SpinalFormalFunSuite {
             .map {
               case (in, out) => {
                 val inputFire = if (in == controls.last) input.valid else False
-                when(past(in.payload === dataIn && in.fire && !out.fire && !inputFire) && past(!outExists(dataIn))) {
+                when(pastValidAfterReset && past(in.payload === dataIn && in.fire && !out.fire && !inputFire) && past(!outExists(dataIn))) {
                   assert(outExists(dataIn))
                 }
               }
@@ -88,5 +89,13 @@ class FormalHistoryModifyableTester extends SpinalFormalFunSuite {
         results.map(x => cover(x.fire))
         cover(results(0).fire && results(2).fire)
       })
+  }
+
+  test("pop_any_symbiyosys") {
+    testMain(SymbiYosysFormalBackend)
+  }
+
+  test("pop_any_ghdl") {
+    testMain(GhdlFormalBackend)
   }
 }

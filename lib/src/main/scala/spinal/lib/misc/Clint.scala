@@ -187,12 +187,14 @@ case class TilelinkClint(hartIds : Seq[Int], p : bus.tilelink.BusParameter) exte
 
 case class ClintPort(hardId: Int) extends Area {
   val mti, msi = InterruptNode.master()
+  val stoptime = Bool()
 }
 
 case class TilelinkClintFiber() extends Area{
   val node = bus.tilelink.fabric.Node.slave()
   val lock = Lock()
 
+  val time = UInt(64 bits)
 
   var specs = ArrayBuffer[ClintPort]()
   def createPort(hartId : Int) = {
@@ -208,10 +210,13 @@ case class TilelinkClintFiber() extends Area{
     val core = TilelinkClint(specs.map(_.hardId), node.bus.p)
     core.io.bus <> node.bus
 
+    core.io.stop := specs.map(_.stoptime).andR
     for(id <- specs.indices){
       specs(id).mti.flag := core.io.timerInterrupt(id)
       specs(id).msi.flag := core.io.softwareInterrupt(id)
     }
+
+    time := core.io.time
   }
 }
 

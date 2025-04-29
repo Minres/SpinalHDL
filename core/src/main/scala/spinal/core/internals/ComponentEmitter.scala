@@ -60,7 +60,7 @@ abstract class ComponentEmitter {
   val referencesOverrides     = mutable.HashMap[Nameable,Any]()
   var algoIdIncrementalOffset = 0
 
-  val syncGroups = mutable.LinkedHashMap[(ClockDomain, ScopeStatement, Boolean), SyncGroup]()
+  val syncGroups = mutable.LinkedHashMap[(ClockDomain, ScopeStatement, Boolean, Any), SyncGroup]()
   val processes  = mutable.LinkedHashSet[AsyncProcess]()
   val initials  = mutable.ArrayBuffer[LeafStatement]()
   val analogs    = ArrayBuffer[BaseType]()
@@ -71,6 +71,8 @@ abstract class ComponentEmitter {
   val outputsToBufferize = mutable.LinkedHashSet[BaseType]() //Check if there is a reference to an output pin (read self outputed signal)
   val subComponentInputToNotBufferize = mutable.HashSet[Any]()
   val openSubIo = mutable.HashSet[BaseType]()
+
+  val createInterfaceWrap = mutable.LinkedHashMap[Data, String]()
 
   def getOrDefault[X,Y](map: java.util.concurrent.ConcurrentHashMap[X,Y], key: X, default: Y) = map.get(key) match {
     case null => default
@@ -97,7 +99,20 @@ abstract class ComponentEmitter {
   }
 
   def isSubComponentInputBinded(data: BaseType) = {
-    if(data.isInput && data.isComb && Statement.isFullToFullStatement(data)/* && data.head.asInstanceOf[AssignmentStatement].source.asInstanceOf[BaseType].component == data.component.parent*/)
+    var hasOtherUse = false
+    if(data.isInput && data.isComb && Statement.isFullToFullStatementOrLit(data)) {
+      data.component.parent.dslBody.foreachStatements{
+        case x: AssignmentStatement => {
+          if(x.source == data) {hasOtherUse = true}
+          x.source.walkExpression{
+            case x: BaseType => if(x == data) {hasOtherUse = true}
+            case _ =>
+          }
+        }
+        case _ =>
+      }
+    }
+    if(data.isInput && data.isComb && (if(hasOtherUse) Statement.isFullToFullStatement(data) else Statement.isFullToFullStatementOrLit(data))/* && data.head.asInstanceOf[AssignmentStatement].source.asInstanceOf[BaseType].component == data.component.parent*/)
       data.head.source
     else
       null
@@ -111,6 +126,71 @@ abstract class ComponentEmitter {
   def elaborate() = {
     val asyncStatement = ArrayBuffer[LeafStatement]()
 
+    //check interface assign
+    val useWrap = mutable.HashMap[Interface, Interface]()
+    if(spinalConfig.mode == SystemVerilog && spinalConfig.svInterface) {
+      val walked = mutable.HashSet[Data]()
+      val ios = component.children.reverse.flatMap(x => x.getOrdredNodeIo.reverse)
+      ios.filter(_.hasTag(IsInterface)).foreach{case t =>
+        val rootIF = t.rootIF()
+        if(!walked.contains(rootIF)) {
+          walked.add(rootIF)
+          val base = rootIF.flatten
+          var lif: Interface = null
+          var rif: Interface = null
+          var canGo = true
+          val allAssign = mutable.ArrayBuffer[(BaseType, BaseType)]()
+          val toRemove = mutable.ArrayBuffer[AssignmentStatement]()
+          component.dslBody.walkStatements {
+            case stmt: AssignmentStatement => if(base.contains(stmt.source) || base.contains(stmt.target)) {
+              if(stmt.source.isInstanceOf[BaseType] && stmt.target.isInstanceOf[BaseType]) {
+                if(stmt.source.asInstanceOf[BaseType].hasTag(IsInterface) && stmt.target.asInstanceOf[BaseType].hasTag(IsInterface)) {
+                  lif = stmt.source.asInstanceOf[BaseType].rootIF()
+                  rif = stmt.target.asInstanceOf[BaseType].rootIF()
+                  allAssign += ((stmt.target.asInstanceOf[BaseType], stmt.source.asInstanceOf[BaseType]))
+                  toRemove += stmt
+                } else {
+                  canGo = false
+                }
+              } else {
+                canGo = false
+              }
+            }
+            case _ =>
+          }
+
+          if(canGo && lif != null && rif != null && lif.definitionName == rif.definitionName) {
+            val canRemove = if(lif.component == component) {
+              val lst = lif.flatten.zip(rif.flatten).map{case (x, y) =>
+                if(x.dir == in) {
+                  (y, x)
+                } else {
+                  (x, y)
+                }
+              }.toList.sortBy{case (a, b) => a.getName() + b.getName()}
+              lst.sameElements(allAssign.toList.sortBy{case (a, b) => a.getName() + b.getName()})
+            } else {
+              val lst = lif.flatten.zip(rif.flatten).map{case (x, y) =>
+                if(x.dir == in) {
+                  (x, y)
+                } else {
+                  (y, x)
+                }
+              }.toList.sortBy{case (a, b) => a.getName() + b.getName()}
+              lst.sameElements(allAssign.toList.sortBy{case (a, b) => a.getName() + b.getName()})
+            }
+            if(canRemove) {
+              toRemove.foreach(x => x.removeStatement())
+              if(lif != rootIF)
+                useWrap += rif -> lif
+              else
+                useWrap += lif -> rif
+            }
+          }
+        }
+      }
+    }
+
     //Sort all leaf statements into their nature (sync/async)
     var syncGroupInstanceCounter = 0
     component.dslBody.walkLeafStatements {
@@ -119,7 +199,7 @@ abstract class ComponentEmitter {
         s.finalTarget match {
           case target: BaseType if target.isComb => asyncStatement += s
           case target: BaseType if target.isReg  =>
-            val group = syncGroups.getOrElseUpdate((target.clockDomain, s.rootScopeStatement, target.hasInit), new SyncGroup(target.clockDomain, s.rootScopeStatement, target.hasInit, syncGroupInstanceCounter))
+            val group = syncGroups.getOrElseUpdate((target.clockDomain, s.rootScopeStatement, target.hasInit, if(spinalConfig.mergeSyncProcess) null else target), new SyncGroup(target.clockDomain, s.rootScopeStatement, target.hasInit, syncGroupInstanceCounter))
             syncGroupInstanceCounter += 1
             s match {
               case s: InitAssignmentStatement => group.initStatements += s
@@ -129,7 +209,7 @@ abstract class ComponentEmitter {
         }
       case assertStatement: AssertStatement => assertStatement.trigger match {
         case AssertStatementTrigger.CLOCKED => {
-          val group = syncGroups.getOrElseUpdate((assertStatement.clockDomain, assertStatement.rootScopeStatement, true), new SyncGroup(assertStatement.clockDomain, assertStatement.rootScopeStatement, true, syncGroupInstanceCounter))
+          val group = syncGroups.getOrElseUpdate((assertStatement.clockDomain, assertStatement.rootScopeStatement, true, null), new SyncGroup(assertStatement.clockDomain, assertStatement.rootScopeStatement, true, syncGroupInstanceCounter))
           syncGroupInstanceCounter += 1
           group.dataStatements += assertStatement
         }
@@ -297,16 +377,48 @@ abstract class ComponentEmitter {
 
 
 
+    val interfaceWrapName = mutable.HashMap[String, String]()
     //Manage subcomponents input bindings
     for(sub <- component.children){
-      for(io <- sub.getOrdredNodeIo if io.isInput){
-        var subInputBinded = isSubComponentInputBinded(io)
+      for(io <- sub.getOrdredNodeIo) {
+        //create subcomponents interface wrapper
+        if(spinalConfig.mode == SystemVerilog && spinalConfig.svInterface && io.hasTag(IsInterface)) {
+          val theme = new Tab2 //TODO add into SpinalConfig
+          val ifName = sub.getNameElseThrow + "_" + io.rootIF().getNameElseThrow
+          val instName = interfaceWrapName.get(ifName) match {
+            case Some(value) => value
+            case None => {
+              val ret = component.localNamingScope.allocateName(ifName)
+              interfaceWrapName += ifName -> ret
+              ret
+            }
+          }
+          useWrap.get(io.rootIF()) match {
+            case Some(wif) => {
+              val name = referencesOverrides.get(wif.flatten(0))
+                .map(x => x match {
+                  case s: String => s
+                  case n: Nameable => n.getNameElseThrow
+                  case _ => throw new Exception(s"Could not determine name of ${wif.flatten(0)}")
+                })
+                .getOrElse(wif.flatten(0).getNameElseThrow).split('.')(0) + io.getNameElseThrow.stripPrefix(io.getNameElseThrow.split('.')(0))
+              referencesOverrides(io) = name
+            }
+            case None => {
+              val name = instName + io.getNameElseThrow.stripPrefix(io.getNameElseThrow.split('.')(0))
+              referencesOverrides(io) = name
+              createInterfaceWrap += io.rootIF() -> instName
+            }
+          }
+        } else if(io.isInput) {
+          var subInputBinded = isSubComponentInputBinded(io)
 
-        if(subInputBinded != null) {
-          referencesOverrides(io) = subInputBinded
-          subComponentInputToNotBufferize += io
-        }else {
-          wrapSubInput(io)
+          if(subInputBinded != null) {
+            referencesOverrides(io) = subInputBinded
+            subComponentInputToNotBufferize += io
+          }else {
+            if(!openSubIo.contains(io)) wrapSubInput(io)
+          }
         }
       }
     }
@@ -358,7 +470,6 @@ abstract class ComponentEmitter {
       check(cd.softReset)
       check(cd.clockEnable)
     })
-
   }
 
   def cutLongExpressions(): Unit ={

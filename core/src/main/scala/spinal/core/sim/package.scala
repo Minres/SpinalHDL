@@ -25,10 +25,13 @@ import spinal.core.sim.{SimBaseTypePimper, SpinalSimConfig}
 import spinal.sim._
 
 import java.math.BigInteger
+import java.util.concurrent.atomic.AtomicLong
 import scala.collection.generic.Shrinkable
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.Seq
+import scala.util.Random
+import scala.util.control.Breaks._
 
 /**
   * Simulation package
@@ -36,8 +39,20 @@ import scala.collection.Seq
 package object sim {
   def SimConfig: SpinalSimConfig = new SpinalSimConfig()
 
+  def killRandom(): Unit = {
+    val r = scala.util.Random.self
+    val field = r.getClass.getDeclaredField("seed")
+    field.setAccessible(true)
+    field.set(r, null)
+  }
   def simRandom(implicit simManager: SimManager = sm) = simManager.random
   def sm = SimManagerContext.current.manager
+
+  def getForbiddenRandom() = {
+    val x = Random.self.getClass.getDeclaredField("seed")
+    x.setAccessible(true)
+    x.get(Random.self).asInstanceOf[AtomicLong]
+  }
 
   @deprecated("Use SimConfig.???.compile(new Dut) instead", "???")
   def SimConfig[T <: Component](rtl: => T): SimConfigLegacy[T] = {
@@ -157,6 +172,35 @@ package object sim {
     manager.setBigInt(signal, value)
   }
 
+  def addInputsAssignmentWatch(mod: Module) {
+    import spinal.core.tools.ModuleAnalyzer
+
+    val analyzer = new ModuleAnalyzer(mod)
+    addWatchedSignals(analyzer.getInputs.toSeq)
+  }
+
+  def checkInputsAssignmentAfterReset(cd: ClockDomain, stopOnFail: Boolean = false) {
+    cd.onSamplingWhile{
+      val ret = checkWatchedSignalAssigned()
+      if(!ret.isEmpty){
+        ret.map(x => SpinalWarning(s"$x is not initialized!"))
+        if(stopOnFail) simFailure(s"Input signals are not assigned.")
+      }
+      false
+    }
+  }
+
+  def addWatchedSignals(signals : Seq[BaseType]){
+    val manager = SimManagerContext.current.manager
+    val simSignals = signals.map{ btToSignal(manager, _) }
+    manager.addWatchedSignals(simSignals.toSeq)
+  }
+
+  def checkWatchedSignalAssigned(): Seq[String] = {
+    val manager = SimManagerContext.current.manager
+    manager.checkWatchedSignalAssigned()
+  }
+
   def simCompiled : SimCompiled[_ <: Component] = sm.asInstanceOf[CoreSimManager].compiled
   def currentTestName(): String = sm.testName
   def currentTestPath(): String = simCompiled.simConfig._testPath.replace("$TEST", currentTestName())
@@ -173,15 +217,23 @@ package object sim {
   /** Sleep / WaitUntil */
   def sleep(cycles: Long): Unit = SimManagerContext.current.thread.sleep(cycles)
   def sleep(cycles: Double): Unit = SimManagerContext.current.thread.sleep(cycles.toLong)
-  def sleep(time: TimeNumber): Unit =
-    sleep((time.toBigDecimal / SimManagerContext.current.manager.timePrecision).setScale(0, BigDecimal.RoundingMode.UP).toLong)
+  def sleep(time: TimeNumber): Unit = {
+    sleep((time.toBigDecimal / timePrecision).setScale(0, BigDecimal.RoundingMode.UP).toLong)
+  }
   def waitUntil(cond: => Boolean): Unit = {
     SimManagerContext.current.thread.waitUntil(cond)
   }
 
   def timeToLong(time : TimeNumber) : Long = {
-    (time.toBigDecimal / SimManagerContext.current.manager.timePrecision).toLong
+    (time.toBigDecimal / timePrecision).toLong
   }
+
+  def hzToLong(hz: HertzNumber): Long = {
+    (1 / hz.toBigDecimal / timePrecision).toLong
+  }
+
+
+  def timePrecision = SimManagerContext.current.manager.timePrecision
 
   /** Fork */
   def fork(body: => Unit): SimThread = SimManagerContext.current.manager.newThread(body)
@@ -247,7 +299,22 @@ package object sim {
     }
   }
 
+  def periodicaly(delay : TimeNumber)(body : => Unit) : Unit = {
+    periodicaly(timeToLong(delay))(body)
+  }
+
   def simThread = SimManagerContext.current.thread
+
+
+  /** Represents the relationship where a SpinalHDL type can be converted
+    * to a certain Scala type during simulation and vice-versa.
+    */
+  trait SimEquiv {
+    type SimEquivT
+
+    def #=(v: SimEquivT)
+    def getSim(): SimEquivT
+  }
 
   /**
     * Add implicit function to BaseType for simulation
@@ -284,7 +351,7 @@ package object sim {
 
 
   implicit class SimSeqPimper[T](pimped: Seq[T]){
-    def randomPick(): T = pimped(simRandom.nextInt(pimped.length))
+    def randomPick(rand : Random = simRandom): T = pimped(rand.nextInt(pimped.length))
     def randomPickWithIndex(): (T, Int) = {
       val index = simRandom.nextInt(pimped.length)
       (pimped(index), index)
@@ -313,6 +380,11 @@ package object sim {
   implicit class SimDataPimper[T <: Data](bt: T) {
 
     def randomize(): Unit = bt.flattenForeach(_.randomize())
+    
+    /** Set a signal inside the component’s hierarchy as accessible from the simulation.
+      * 
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#accessing-signals-inside-the-component-s-hierarchy section in simulation doc]]
+      */
     def simPublic(): T = bt.addTag(SimPublic)
   }
 
@@ -323,13 +395,18 @@ package object sim {
   implicit class SimMemPimper[T <: Data](mem: Mem[T]) {
     def setBigInt(address : Long, data : BigInt): Unit = sim.setBigInt(mem,address,data)
     def getBigInt(address : Long): BigInt = sim.getBigInt(mem,address)
+    
+    /** Set a signal inside the component’s hierarchy as accessible from the simulation.
+      * 
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#accessing-signals-inside-the-component-s-hierarchy section in simulation doc]]
+      */
     def simPublic(): Mem[T] = mem.addTag(SimPublic)
   }
 
   /**
     * Add implicit function to Bool
     */
-  implicit class SimBoolPimper(bt: Bool) {
+  implicit class SimBoolPimper(bt: Bool) extends SimEquiv {
     def simProxy() = new SimProxy(bt)
     class SimProxy(bt : Bool){
       val manager = SimManagerContext.current.manager
@@ -341,14 +418,87 @@ package object sim {
       }
     }
 
-    def toBoolean = getLong(bt) != 0
-
-    def #=(value: Boolean) = setLong(bt, if(value) 1 else 0)
-
     def randomize(): Boolean = {
       val b = simRandom.nextBoolean()
       bt #= b
       b
+    }
+
+    // SimEquiv implementation
+    type SimEquivT = Boolean
+    
+    /** Assign a hardware ``Bool`` from an Scala ``Boolean``
+      *
+      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      */
+    def #=(value: Boolean) = setLong(bt, if(value) 1 else 0)
+    
+    def getSim(): SimEquivT = getLong(bt) != 0
+
+    def toBoolean = getSim()
+    def toInt = getLong(bt)
+  }
+
+
+  // Several SimEquiv implementations needed since BitVector can correspond to several types
+  implicit class SimEquivBitVectorLongPimper(bt: BitVector) extends SimEquiv {
+    type SimEquivT = Long
+    
+    /** Assign a hardware ``BitVector`` from an Scala ``Long``
+      *
+      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      */
+    def #=(value: Long) = setLong(bt, value)
+
+    def getSim(): Long = getLong(bt)
+  }
+
+  implicit class SimEquivBitVectorBigIntPimper(bt: BitVector) extends SimEquiv {
+    type SimEquivT = BigInt
+    def #=(value: BigInt)    = setBigInt(bt, value)
+    def getSim(): BigInt = getBigInt(bt)
+  }
+
+  implicit class SimEquivBitVectorBytesPimper(bt: BitVector) extends SimEquiv {
+    type SimEquivT = Array[Byte]
+    
+    /** Assign a hardware ``BitVector`` from an Scala ``Array[Byte]``
+      *
+      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      */
+    def #=(value: Array[Byte])    = {
+      var acc = BigInt(0)
+      for(i <- value.size-1 downto 0) {
+        acc = acc << 8
+        acc |= value(i).toInt & 0xFF
+      }
+
+      setBigInt(bt, acc)
+    }
+    def getSim(): Array[Byte] = getBigInt(bt).toBytes(bt.getBitsWidth)
+  }
+
+  implicit class SimEquivBitVectorBooleansPimper(bt: BitVector) extends SimEquiv {
+    type SimEquivT = Array[Boolean]
+
+    /** Assign a hardware ``BitVector`` from an Scala ``Array[Boolean]``
+      *
+      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      */
+    def #=(value: Array[Boolean]) = {
+      var acc = BigInt(0)
+      for(i <- value.size-1 downto 0){
+        if(value(i)) acc = acc.setBit(i)
+      }
+      setBigInt(bt, acc)
+    }
+
+    def getSim(): Array[Boolean] = {
+      val width = bt.getBitsWidth
+      val ret = new Array[Boolean](width)
+      val bi = bt.toBigInt
+      for(i <- 0 until width) ret(i) = bi.testBit(i)
+      ret
     }
   }
 
@@ -365,6 +515,10 @@ package object sim {
       def toLong = if(alwaysZero) 0 else manager.getLong(signal)
       def toBigInt = if(alwaysZero) 0 else manager.getBigInt(signal)
 
+      /** Assign a hardware ``BitVector`` from an Scala ``Int``
+        *
+        * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+        */
       def #=(value: Int) : Unit  = {
         if(alwaysZero) {
           assert(value == 0)
@@ -372,6 +526,11 @@ package object sim {
         }
         manager.setLong(signal, value)
       }
+
+      /** Assign a hardware ``BitVector`` from an Scala ``Long``
+        *
+        * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+        */      
       def #=(value: Long) : Unit  = {
         if(alwaysZero) {
           assert(value == 0)
@@ -388,35 +547,72 @@ package object sim {
       }
     }
 
-    def toInt    = getInt(bt)
-    def toLong(implicit manager: SimManager = SimManagerContext.current.manager)   = getLong(bt)(manager)
-    def toBigInt = getBigInt(bt)
-    def toBytes: Array[Byte] = toBigInt.toBytes(bt.getBitsWidth)
-    def toBooleans : Array[Boolean] = {
-      val width = bt.getBitsWidth
-      val ret = new Array[Boolean](width)
-      val bi = toBigInt
-      for(i <- 0 until width) ret(i) = bi.testBit(i)
-      ret
+    def toInt: Int = getInt(bt)
+    def toLong: Long = getLong(bt)
+    def toBigInt: BigInt = getBigInt(bt)
+    def toBytes: Array[Byte] = SimEquivBitVectorBytesPimper(bt).getSim
+    def toBooleans : Array[Boolean] = SimEquivBitVectorBooleansPimper(bt).getSim
+  }
+
+  object SimUnionElementPimper {
+    type PendingAssign = mutable.HashMap[Range, BigInt]
+    val pendingAssignMap = mutable.HashMap[UnionElement[_], PendingAssign]()
+  }
+  implicit class SimUnionElementPimper[T <: Data](ue: UnionElement[T]) {
+    val dummyData = ue.t()
+    val pendingAssign = SimUnionElementPimper.pendingAssignMap.getOrElseUpdate(
+      ue,
+      new SimUnionElementPimper.PendingAssign())
+
+    class SimProxy[E <: Data](rawBits: Bits, e: E) {
+      var offset = 0
+      breakable {
+        for (ee <- dummyData.flatten) {
+          if (ee == e) break()
+          offset += ee.getBitsWidth
+        }
+      }
+      val range = offset + e.getBitsWidth - 1 downto offset
+      val alwaysZero = e.getBitsWidth == 0
+      val manager = SimManagerContext.current.manager
+      val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](rawBits.algoInt)
+
+      def toBigInt = if (alwaysZero) BigInt(0) else {
+        (manager.getBigInt(signal) & range.mask) >> offset
+      }
+
+      def #=(value: BigInt): Unit = {
+        if (alwaysZero) {
+          assert(value == 0)
+          return
+        }
+        pendingAssign += range -> value
+      }
+      def toInt = {
+        assert(e.getBitsWidth <= 32)
+        toBigInt.toInt
+      }
+      def toBoolean = {
+        assert(e.getBitsWidth == 1)
+        toBigInt != 0
+      }
+      def #=(value: Boolean): Unit = {
+        assert(e.getBitsWidth == 1)
+        #=(value.toInt)
+      }
     }
 
-    def #=(value: Int)    = setLong(bt, value)
-    def #=(value: Long)   = setLong(bt, value)
-    def #=(value: BigInt) = setBigInt(bt, value)
-    def #=(value: Array[Byte]) = { //TODO improve perf
-      var acc = BigInt(0)
-      for(i <- value.size-1 downto 0){
-        acc = acc << 8
-        acc |= value(i).toInt & 0xFF
-      }
-      setBigInt(bt, acc)
-    }
-    def #=(value: Array[Boolean]) = { //TODO improve perf
-      var acc = BigInt(0)
-      for(i <- value.size-1 downto 0){
-        if(value(i)) acc = acc.setBit(i)
-      }
-      setBigInt(bt, acc)
+    def simGet[E <: Data](locator: T => E) = new SimProxy(ue.host.raw, locator(dummyData))
+    def commit(): Unit = {
+      val manager = SimManagerContext.current.manager
+      val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](ue.host.raw.algoInt)
+      val orig = manager.getBigInt(signal)
+      val filteredOrig = pendingAssign.map(_._1.mask).foldLeft(orig)(_ &~ _)
+      val newVal = pendingAssign.map { case (range, value) =>
+        (value << range.low) & range.mask
+      }.fold(filteredOrig)(_ | _)
+      manager.setBigInt(signal, newVal)
+      pendingAssign.clear()
     }
   }
 
@@ -481,17 +677,21 @@ package object sim {
   /**
     * Add implicit function to Enum
     */
-  implicit class SimEnumPimper[T <: SpinalEnum](bt: SpinalEnumCraft[T]) {
+  implicit class SimEnumPimper[T <: SpinalEnum](bt: SpinalEnumCraft[T]) extends SimEquiv {
 
-    def toEnum = bt.encoding.getElement(getBigInt(bt), bt.spinalEnum).asInstanceOf[SpinalEnumElement[T]]
-
-    def #=(value: SpinalEnumElement[T]) = setBigInt(bt, bt.encoding.getValue(value))
 
     def randomize(): SpinalEnumElement[T] = {
       val e = bt.spinalEnum.elements(simRandom.nextInt(bt.spinalEnum.elements.length))
       setBigInt(bt, bt.encoding.getValue(e))
       e.asInstanceOf[SpinalEnumElement[T]]
     }
+
+    // SimEquiv implementation
+    type SimEquivT = SpinalEnumElement[T]
+    def #=(value: SpinalEnumElement[T]) = setBigInt(bt, bt.encoding.getValue(value))
+    def getSim = bt.encoding.getElement(getBigInt(bt), bt.spinalEnum).asInstanceOf[SpinalEnumElement[T]]
+
+    def toEnum = getSim
   }
 
   /**
@@ -625,7 +825,13 @@ package object sim {
       }
     }
   }
-  
+
+  implicit class SimEquivVecSeqPimper[T <: Data, E](s: Vec[T])(implicit ev: T => SimEquiv { type SimEquivT = E }) extends SimEquiv {
+    type SimEquivT = Seq[E]
+    def #=(v: SimEquivT) = s.zip(v).foreach(p => p._1 #= p._2)
+    def getSim(): SimEquivT = s.map(_.getSim()).toSeq
+  }
+
   /**
     * Add implicit function to BigInt
     */
@@ -850,7 +1056,24 @@ package object sim {
       }
     }
 
-    def doStimulus(period: Long): Unit = {
+    def waitInactiveEdge(): Unit = waitInactiveEdge(1)
+    def waitInactiveEdge(count: Int = 1): Unit = {
+      if (cd.config.clockEdge == spinal.core.RISING) {
+        waitFallingEdge(count)
+      }else{
+        waitRisingEdge(count)
+      }
+    }
+
+    def waitInactiveEdgeWhere(condAnd: => Boolean): Unit = {
+      if(cd.config.clockEdge == spinal.core.RISING) {
+        waitFallingEdgeWhere(condAnd)
+      }else {
+        waitRisingEdgeWhere(condAnd)
+      }
+    }
+
+    def doStimulus(period: Long, resetCycles : Int = 16): Unit = {
       assert(period >= 2)
 
       if(cd.hasClockEnableSignalSim) assertClockEnable()
@@ -868,7 +1091,7 @@ package object sim {
               case LOW => true
             })
             sleep(0)
-            DoReset(resetSim, period*16, cd.config.resetActiveLevel)
+            DoReset(resetSim, period*resetCycles, cd.config.resetActiveLevel)
           }
           sleep(period)
           DoClock(clockSim, period)
@@ -877,7 +1100,7 @@ package object sim {
           cd.assertReset()
           val clk = clockSim
           var value = clk.toBoolean
-          for(repeat <- 0 to 31){
+          for(repeat <- 0 to resetCycles*2){
             value = !value
             clk #= value
             sleep(period >> 1)
@@ -891,10 +1114,18 @@ package object sim {
       } else {
         throw new Exception("???")
       }
-
     }
 
-    def forkStimulus(period: Long, sleepDuration : Int = 0) : Unit = {
+    def forkStimulus() : Unit = {
+      val hz = cd.frequency match {
+        case ClockDomain.FixedFrequency(value) => value.toBigDecimal
+        case _ => throw new Exception(s"Can't forkStimulus() w/o explicit frequency since frequency of ClockDomain $cd is not known")
+      }
+      val period = (1 / hz / timePrecision).setScale(0, BigDecimal.RoundingMode.UP).toLong
+      forkStimulus(period, 0)
+    }
+    def forkStimulus(period: Long) : Unit = forkStimulus(period, 0)
+    def forkStimulus(period: Long, sleepDuration : Int = 0, resetCycles : Int = 16) : Unit = {
       cd.config.clockEdge match {
         case RISING  => fallingEdge()
         case FALLING => risingEdge()
@@ -902,7 +1133,7 @@ package object sim {
       if(cd.hasResetSignalSim) cd.deassertReset()
       if(cd.hasSoftResetSignalSim) cd.deassertSoftReset()
       if(cd.hasClockEnableSignalSim) cd.deassertClockEnable()
-      fork(doStimulus(period))
+      fork(doStimulus(period, resetCycles))
       if(sleepDuration >= 0) sleep(sleepDuration) //This allows the doStimulus to give initial value to clock/reset before going further
     }
 

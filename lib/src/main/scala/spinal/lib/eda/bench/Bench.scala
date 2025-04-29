@@ -7,6 +7,7 @@ import java.util.concurrent.ForkJoinPool
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future}
 import scala.collection.Seq
+import scala.util.Random
 
 /**
  * Created by PIC32F_USER on 16/07/2017.
@@ -53,7 +54,7 @@ object Rtl {
     c
   }
 
-  def xorOutputs[T <: Component](c : T): T ={
+  def xorOutputs[T <: Component](c : T, cd : ClockDomain = ClockDomain.current): T ={
     def buf1[T <: Data](that : T) = KeepAttribute(RegNext(that)).addAttribute("DONT_TOUCH")
     def buf[T <: Data](that : T) = buf1(buf1(buf1(that)))
     c.rework{
@@ -65,13 +66,30 @@ object Rtl {
     }
     c
   }
+
+  def compactInputs[T <: Component](c: T, cd : ClockDomain = ClockDomain.current) : T = {
+    def buf1[T <: Data](that: T) = KeepAttribute(RegNext(that)).addAttribute("DONT_TOUCH")
+    def buf[T <: Data](that: T) = buf1(buf1(buf1(that)))
+    c.rework {
+      cd {
+        val inputs = c.getAllIo.toList.filter(_.isInput).filter(_.getBitsWidth > 1)
+        inputs.foreach(_.setAsDirectionLess())
+        var ptr = in(Bits(1 bits))
+        for (pin <- inputs; bitId <- 0 until widthOf(pin)) {
+          ptr = buf(ptr)
+          pin.assignFromBits(ptr, bitId, 1 bits)
+        }
+      }
+    }
+    c
+  }
 }
 
 object Bench {
   def apply(rtls : Seq[Rtl], targets : Seq[Target], workspacesRoot : String = sys.env.getOrElse("SPINAL_BENCH_WORKSPACE", null)): Unit ={
     import scala.concurrent.ExecutionContext
     implicit val ec = ExecutionContext.fromExecutorService(
-      new ForkJoinPool(Math.max(1, SimManager.cpuCount / 2), ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true)
+      new ForkJoinPool(Math.max(1, sys.env.getOrElse("SPINAL_BENCH_THREAD_COUNT", SimManager.cpuCount/4 toString).toInt), ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true)
     )
 
     val results = (for (rtl <- rtls) yield {
@@ -83,17 +101,19 @@ object Bench {
     }).toMap
 
     for (rtl <- rtls) {
-      for (target <- targets) {
+      for (target <- Random.shuffle(targets)) {
         Await.ready(results(rtl)(target), Duration.Inf)
       }
     }
 
+    val targetNameLengthMax = targets.map(_.getFamilyName().size).max
     for (rtl <- rtls) {
       println(s"${rtl.getName()} ->")
       for (target <- targets) {
         try{
           val report = results(rtl)(target).value.get.get
-          println(s"${target.getFamilyName()} -> ${(report.getFMax / 1e6).toInt} Mhz ${report.getArea()}")
+          val name = target.getFamilyName()
+          println(s"- ${name}${" " * (targetNameLengthMax-name.size)} -> ${(report.getFMax / 1e6).toInt} Mhz ${report.getArea()}")
         } catch {
           case t : Throwable =>  println(s"${target.getFamilyName()} -> FAILED")
         }

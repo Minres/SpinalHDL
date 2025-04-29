@@ -99,6 +99,7 @@ class SimManager(val raw : SimRaw, val random: Random = Random, val testName : S
   val sensitivities = mutable.ArrayBuffer[SimManagerSensitive]()
   var commandBuffer = mutable.ArrayBuffer[() => Unit]()
   val onEndListeners = mutable.ArrayBuffer[() => Unit]()
+  val watchedAssignments = mutable.HashMap[Signal, Boolean]()
   var time, deltaCycle = 0l
   private var retains = 0
   var userData : Any = null
@@ -177,14 +178,29 @@ class SimManager(val raw : SimRaw, val random: Random = Random, val testName : S
   def setLong(bt : Signal, value : Long): Unit = {
     bt.dataType.checkLongRange(value, bt)
     commandBuffer += {() => raw.setLong(bt, value); if(readBypass != null)(readBypass += (bt -> BigInt(value)))}
+    if(watchedAssignments.contains(bt)) watchedAssignments(bt) = true
   }
   def setBigInt(bt : Signal, value : BigInt): Unit = {
     bt.dataType.checkBigIntRange(value, bt)
     commandBuffer += {() => raw.setBigInt(bt, value); if(readBypass != null) readBypass += (bt -> value)}
+    if(watchedAssignments.contains(bt)) watchedAssignments(bt) = true
   }
   def setBigInt(mem : Signal,address : Long, value : BigInt): Unit = {
     mem.dataType.checkBigIntRange(value, mem)
     commandBuffer += {() => raw.setBigIntMem(mem, value, address) /*;if(readBypass != null) readBypass += (bt -> value)*/}
+    if(watchedAssignments.contains(mem)) watchedAssignments(mem) = true
+  }
+
+  def addWatchedSignals(signals: Seq[Signal]): Unit = {
+    signals.foreach{ x =>
+      watchedAssignments(x) = false
+    }
+  }
+
+  def checkWatchedSignalAssigned(): Seq[String] = {
+    val signalNames = watchedAssignments.filter{ case (k, v) => v == false }
+      .map{case (k, v) => k.toString}
+    signalNames.toSeq
   }
 
   def schedule(thread : SimCallSchedule): Unit = {
@@ -344,7 +360,7 @@ class SimManager(val raw : SimRaw, val random: Random = Random, val testName : S
         raw.sleep(1)
         val str = e.getStackTrace.head.toString
         if(str.contains("spinal.core.") && !str.contains("sim")){
-          System.err.println("It seems like you used some SpinalHDL hardware elaboration API in the simulation. If you did, you shouldn't.")
+          System.err.println(s"It seems like you used some SpinalHDL hardware elaboration API in the simulation. If you did, you shouldn't. From : \n${e.getStackTrace.mkString("\n")}")
         }
         throw e
       }

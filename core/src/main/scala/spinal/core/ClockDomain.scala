@@ -27,16 +27,16 @@ import scala.collection.mutable
 import scala.collection.immutable
 import scala.collection.mutable.ArrayBuffer
 
-sealed trait EdgeKind
+sealed trait EdgeKind extends AreaObject
 object RISING  extends EdgeKind
 object FALLING extends EdgeKind
 
-sealed trait ResetKind
+sealed trait ResetKind extends AreaObject
 object ASYNC extends ResetKind
 object SYNC  extends ResetKind
 object BOOT  extends ResetKind
 
-sealed trait Polarity{
+sealed trait Polarity extends AreaObject{
   def assertedBool : Bool
   def deassertedBool : Bool
 }
@@ -51,7 +51,7 @@ object LOW  extends Polarity{
 
 case class ClockDomainTag(clockDomain: ClockDomain) extends SpinalTag{
   override def toString = s"ClockDomainTag($clockDomain)"
-  override def allowMultipleInstance = false
+  override def allowMultipleInstance = true
 }
 
 case class ClockDomainReportTag(clockDomain: ClockDomain) extends SpinalTag{
@@ -313,13 +313,13 @@ object Clock{
   }
 }
 
-/**
-  * clock and reset signals can be combined to create a clock domain.
+/** Clock and reset signals can be combined to create a clock domain.
+  * 
   * Clock domains could be applied to some area of the design and then all synchronous elements instantiated into this
   * area will then implicitly use this clock domain.
   * Clock domain application work like a stack, which mean, if you are in a given clock domain, you can still apply another clock domain locally
   *
-  * @see  [[http://spinalhdl.github.io/SpinalDoc/spinal/core/clock_domain ClockDomain Documentation]]
+  * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Structuring/clock_domain.html clock domains documentation]]
   */
 case class ClockDomain(clock       : Bool,
                        reset       : Bool = null,
@@ -327,7 +327,7 @@ case class ClockDomain(clock       : Bool,
                        softReset   : Bool = null,
                        clockEnable : Bool = null,
                        config      : ClockDomainConfig = GlobalData.get.commonClockConfig,
-                       frequency   : ClockDomain.ClockFrequency = UnknownFrequency(),
+                       var frequency   : ClockDomain.ClockFrequency = UnknownFrequency(),
                        clockEnableDivisionRate : ClockDomain.DivisionRate = ClockDomain.UnknownDivisionRate()) extends SpinalTagReady {
 
   assert(!(reset != null && config.resetKind == BOOT), "A reset pin was given to a clock domain where the config.resetKind is 'BOOT'")
@@ -378,7 +378,7 @@ case class ClockDomain(clock       : Bool,
 //                               reset : String = if(config.resetActiveLevel == HIGH) "reset" else "resetn",
 //                               softReset : String = if(config.softResetActiveLevel == HIGH) "soft_reset" else "soft_resetn",
 //                               enable : String  = if(config.clockEnableActiveLevel == HIGH) "clk_en" else "clk_en"): this.type ={
-def renamePulledWires(clock     : String = null,
+  def renamePulledWires(clock     : String = null,
                       reset     : String = null,
                       softReset : String = null,
                       enable    : String = null): this.type ={
@@ -437,12 +437,12 @@ def renamePulledWires(clock     : String = null,
         case `SYNC` if hasResetSignal => enable || isResetActive //Ensure that the area get a reset even if the enable isn't set
         case _ => enable
       }
-      this.copy(clockEnable = syncResetFix(RegNext(tick) init(False)), clockEnableDivisionRate = divisionRate, config = ClockDomain.current.config.copy(clockEnableActiveLevel = HIGH))
+      this.copy(clockEnable = syncResetFix(RegNext(tick) init(False)) && ClockDomain.current.isClockEnableActive, clockEnableDivisionRate = divisionRate, config = ClockDomain.current.config.copy(clockEnableActiveLevel = HIGH))
     }
   }
 
   def newSlowedClockDomain(freq: HertzNumber): ClockDomain = {
-    val currentFreq = ClockDomain.current.frequency.getValue.toBigDecimal
+    val currentFreq = frequency.getValue.toBigDecimal
     freq match {
       case x if x.toBigDecimal > currentFreq => SpinalError("To high frequancy")
       case x                                 => newClockDomainSlowedBy((currentFreq/freq.toBigDecimal).toBigInt)
@@ -496,9 +496,6 @@ def renamePulledWires(clock     : String = null,
       case _ : Throwable => return UnknownFrequency()
     }
   }
+
+  class Area extends ClockingArea(this)
 }
-
-
-
-
-
