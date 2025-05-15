@@ -164,6 +164,7 @@ class Cache(val p : CacheParam) extends Component {
   }
 
   case class Tags(val withData : Boolean) extends Bundle {
+    val _padding = Bool()
     val tag = UInt(tagRange.size bits)
     val dirty = withData generate Bool()
     val trunk = Bool()
@@ -915,6 +916,7 @@ class Cache(val p : CacheParam) extends Component {
       cache.tags.write.address := CTRL_CMD.address(setsRange)
       cache.tags.write.mask := tags.CACHE_HITS | UIntToOh(olderWay.wayId).andMask(askAllocate)
       cache.tags.write.loaded := True
+      cache.tags.write.data._padding := True
       cache.tags.write.data.tag := CTRL_CMD.address(tagRange)
       cache.tags.write.data.dirty := CACHE_LINE.dirty && !askAllocate
       cache.tags.write.data.trunk := CACHE_LINE.trunk
