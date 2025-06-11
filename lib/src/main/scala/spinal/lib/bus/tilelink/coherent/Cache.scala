@@ -388,6 +388,7 @@ class Cache(val p : CacheParam) extends Component {
 
   val flush = withFlush generate new Area {
     val reserved = RegInit(False)
+    val idle = RegInit(True)
     val address, upTo = Reg(ubp.address())
     val start = False
 
@@ -398,7 +399,10 @@ class Cache(val p : CacheParam) extends Component {
       val inflight = CounterUpDown(generalSlotCount + ctrlLoopbackDepth + 4)
       val gsMask = Reg(Bits(generalSlotCount bits))
 
-      IDLE.whenIsActive(when(start)(goto(CMD)))
+      IDLE.whenIsActive(when(start) {
+        idle := False
+        goto(CMD)
+      })
 
       CMD whenIsActive {
         when(cmd.fire) {
@@ -420,6 +424,7 @@ class Cache(val p : CacheParam) extends Component {
       GS whenIsActive {
         when(gsMask === 0) {
           reserved := False
+          idle := True
           goto(IDLE)
         }
       }
@@ -466,6 +471,7 @@ class Cache(val p : CacheParam) extends Component {
     mapper.read(flush.reserved || withSelfFlush.mux(selfFlusher.isActive(selfFlusher.CMD), False), 0x08)
     mapper.writeMultiWord(flush.address, 0x10)
     mapper.writeMultiWord(flush.upTo, 0x18)
+    mapper.read(flush.idle, 0x20)
   }
 
   val fromUpA = new Area{
