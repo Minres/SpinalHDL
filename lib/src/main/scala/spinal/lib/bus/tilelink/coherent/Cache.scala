@@ -523,7 +523,7 @@ class Cache(val p : CacheParam) extends Component {
   val victimBuffer = new Area{
     val ram = Mem.fill(generalSlotCount*wordsPerLine)(io.up.p.data())
     val write = ram.writePort()
-    val read = ram.readSyncPortMuxed()
+    val read = ram.readSyncPort()
   }
 
 
@@ -1608,7 +1608,7 @@ class Cache(val p : CacheParam) extends Component {
     import inserter._
 
     val readPort = gs.ctxDownD.ram.readSyncPort()
-    readPort.cmd.valid := True //fetchStage.isFireing
+    readPort.cmd.valid := fetchStage.isFireing
     readPort.cmd.payload := fetchStage(CMD).source.resized
     readStage(CTX) := readPort.rsp
 
