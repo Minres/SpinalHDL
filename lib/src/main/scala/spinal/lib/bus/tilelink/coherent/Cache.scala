@@ -128,6 +128,7 @@ class Cache(val p : CacheParam) extends Component {
       val ctrlProcess, writeBackend = master(Flow(OrderingCmd(up.p.sizeBytes)))
       def all = List(ctrlProcess, writeBackend)
     }
+    val flushActive = withFlush generate out Bool()
   }
 
   this.addTags(io.ordering.all.map(OrderingTag(_)))
@@ -392,6 +393,8 @@ class Cache(val p : CacheParam) extends Component {
     val address, upTo = Reg(ubp.address())
     val start = False
 
+    io.flushActive := !idle
+
     val cmd = Stream(new CtrlCmd())
     val fsm = new StateMachine {
       val IDLE, CMD, INFLIGHT, GS = new State()
@@ -399,9 +402,15 @@ class Cache(val p : CacheParam) extends Component {
       val inflight = CounterUpDown(generalSlotCount + ctrlLoopbackDepth + 4)
       val gsMask = Reg(Bits(generalSlotCount bits))
 
+      val WAIT = new StateDelay(cyclesCount = 50) {
+        whenCompleted {
+          goto(CMD)
+        }
+      }
+
       IDLE.whenIsActive(when(start) {
         idle := False
-        goto(CMD)
+        goto(WAIT)
       })
 
       CMD whenIsActive {
