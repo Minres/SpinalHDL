@@ -163,8 +163,9 @@ class Cache(val p : CacheParam) extends Component {
     }
   }
 
+
   case class Tags(val withData : Boolean) extends Bundle {
-    val _padding = Bool()
+    val loaded = Bool()
     val tag = UInt(tagRange.size bits)
     val dirty = withData generate Bool()
     val trunk = Bool()
@@ -184,30 +185,18 @@ class Cache(val p : CacheParam) extends Component {
 
     val tags = new Area {
       val ram = Mem.fill(sets)(Vec.fill(ways)(Tags(withData)))
-      val loaded = Mem.fill(sets)(Vec.fill(ways)(Bool()))
-      loaded.init(List.fill(ram.wordCount)(Vec.fill(ways)(False)))
-      if(GlobalData.get.config.device == Device.ASIC) {
-        loaded.technology = registerFile
-      }
       val read = ram.readSyncPort
-      val readLoaded = loaded.readSyncPort
       val writeRaw = ram.writePortWithMask(ways)
-      val writeLoadedRaw = loaded.writePortWithMask(ways)
       val write = new Area{
         val valid = Bool()
         val address = ram.addressType()
         val mask = Bits(ways bits)
         val data = Tags(withData)
-        val loaded = Bool()
 
         writeRaw.valid := valid
         writeRaw.address := address
         writeRaw.mask := mask
         writeRaw.data.foreach(_:= data)
-        writeLoadedRaw.valid := valid
-        writeLoadedRaw.address := address
-        writeLoadedRaw.mask := mask
-        writeLoadedRaw.data.foreach(_:= loaded)
 
         assert(!(valid && data.trunk && data.owners === 0))
       }
@@ -731,10 +720,7 @@ class Cache(val p : CacheParam) extends Component {
 
     cache.tags.read.cmd.valid := addressStage.isFireing
     cache.tags.read.cmd.payload := addressStage(CTRL_CMD).address(lineRange)
-    cache.tags.readLoaded.cmd.valid := addressStage.isFireing
-    cache.tags.readLoaded.cmd.payload := addressStage(CTRL_CMD).address(lineRange)
     val CACHE_TAGS = dataStage.insert(cache.tags.read.rsp)
-    val CACHE_LOADED = dataStage.insert(cache.tags.readLoaded.rsp)
 
     cache.plru.read.cmd.valid := addressStage.isFireing
     cache.plru.read.cmd.payload := addressStage(CTRL_CMD).address(setsRange)
@@ -743,11 +729,9 @@ class Cache(val p : CacheParam) extends Component {
 
     val tags = new Area{
       import tagStage._
-      val readTags = tagStage(CACHE_TAGS)
-      val readLoaded = tagStage(CACHE_LOADED)
-      val read = readTags zip readLoaded
-      val CACHE_HITS  = insert(read.map { case (t, l) => l && t.tag === CTRL_CMD.address(tagRange)}.asBits)
-      val SOURCE_HITS = insert(read.map { case (t, _) => (t.owners & inserter.SOURCE_OH).orR}.asBits)
+      val read = tagStage(CACHE_TAGS)
+      val CACHE_HITS  = insert(read.map { t => t.loaded && t.tag === CTRL_CMD.address(tagRange)}.asBits)
+      val SOURCE_HITS = insert(read.map { t => (t.owners & inserter.SOURCE_OH).orR}.asBits)
     }
 
     val preCtrl = new Area{
@@ -906,7 +890,6 @@ class Cache(val p : CacheParam) extends Component {
         val unlocked = CombInit(!preCtrl.GS_HIT) //Pessimistic, as way check could help reduce conflict
         val wayId = CombInit(plru.io.evict.id)
         val tags = CACHE_TAGS(wayId)
-        val loaded = CACHE_LOADED(wayId)
         val address = tags.tag @@ CTRL_CMD.address(setsRange) @@ U(0, log2Up(blockSize) bits)
       }
 
@@ -915,8 +898,7 @@ class Cache(val p : CacheParam) extends Component {
       cache.tags.write.valid := tags.CACHE_HITS.orR || askAllocate
       cache.tags.write.address := CTRL_CMD.address(setsRange)
       cache.tags.write.mask := tags.CACHE_HITS | UIntToOh(olderWay.wayId).andMask(askAllocate)
-      cache.tags.write.loaded := True
-      cache.tags.write.data._padding := True
+      cache.tags.write.data.loaded := True
       cache.tags.write.data.tag := CTRL_CMD.address(tagRange)
       cache.tags.write.data.dirty := CACHE_LINE.dirty && !askAllocate
       cache.tags.write.data.trunk := CACHE_LINE.trunk
@@ -1004,7 +986,7 @@ class Cache(val p : CacheParam) extends Component {
       toOrdering >> io.ordering.ctrlProcess
 
       //Generate a victim
-      when(askAllocate && olderWay.loaded){
+      when(askAllocate && olderWay.tags.loaded){
         when(olderWay.tags.owners.orR) {
           askProbe := True
           gsPendingVictim := True
@@ -1048,7 +1030,7 @@ class Cache(val p : CacheParam) extends Component {
 
       if(withFlush) when(preCtrl.IS_FLUSH){
         gsPendingPrimary := False
-        cache.tags.write.loaded := False
+        cache.tags.write.data.loaded := False
         when(CACHE_HIT) {
           when(CACHE_LINE.owners.orR) {
             askProbe := True
