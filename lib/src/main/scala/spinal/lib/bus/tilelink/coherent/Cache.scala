@@ -180,6 +180,10 @@ class Cache(val p : CacheParam) extends Component {
     val plru = new Area{
       val ram = Mem.fill(sets)(Plru.State(cacheWays))
       val read = ram.readSyncPort
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort
     }
 
@@ -372,6 +376,10 @@ class Cache(val p : CacheParam) extends Component {
   val gs = new SlotPool(generalSlotCount)(new GeneralSlot){
     val ctxDownD = new Area{
       val ram = Mem.fill(generalSlotCount)(CtxDownD())
+      ram.initBigInt(List.fill(generalSlotCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
     val fullUpA = slots.dropRight(p.generalSlotCountUpCOnly).map(_.valid).andR
@@ -524,6 +532,10 @@ class Cache(val p : CacheParam) extends Component {
   val prober = new SlotPool(probeCount)(new ProberSlot){
     val ctx = new Area{
       val ram = Mem.fill(probeCount)(new CtrlCmd())
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
 
