@@ -128,6 +128,7 @@ class Cache(val p : CacheParam) extends Component {
       val ctrlProcess, writeBackend = master(Flow(OrderingCmd(up.p.sizeBytes)))
       def all = List(ctrlProcess, writeBackend)
     }
+    val flushActive = withFlush generate out Bool()
   }
 
   this.addTags(io.ordering.all.map(OrderingTag(_)))
@@ -163,6 +164,7 @@ class Cache(val p : CacheParam) extends Component {
     }
   }
 
+
   case class Tags(val withData : Boolean) extends Bundle {
     val loaded = Bool()
     val tag = UInt(tagRange.size bits)
@@ -178,14 +180,16 @@ class Cache(val p : CacheParam) extends Component {
     val sets = bytes / blockSize / ways
     val plru = new Area{
       val ram = Mem.fill(sets)(Plru.State(cacheWays))
-      val read = ram.readSyncPort
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
+      val read = ram.readSyncPortMuxed()
       val write = ram.writePort
     }
 
     val tags = new Area {
       val ram = Mem.fill(sets)(Vec.fill(ways)(Tags(withData)))
-      if(GlobalData.get.config.device == Device.ASIC)
-        ram.technology = registerFile
       val read = ram.readSyncPort
       val writeRaw = ram.writePortWithMask(ways)
       val write = new Area{
@@ -373,6 +377,10 @@ class Cache(val p : CacheParam) extends Component {
   val gs = new SlotPool(generalSlotCount)(new GeneralSlot){
     val ctxDownD = new Area{
       val ram = Mem.fill(generalSlotCount)(CtxDownD())
+      ram.initBigInt(List.fill(generalSlotCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
     val fullUpA = slots.dropRight(p.generalSlotCountUpCOnly).map(_.valid).andR
@@ -381,8 +389,11 @@ class Cache(val p : CacheParam) extends Component {
 
   val flush = withFlush generate new Area {
     val reserved = RegInit(False)
+    val idle = RegInit(True)
     val address, upTo = Reg(ubp.address())
     val start = False
+
+    io.flushActive := !idle
 
     val cmd = Stream(new CtrlCmd())
     val fsm = new StateMachine {
@@ -391,7 +402,16 @@ class Cache(val p : CacheParam) extends Component {
       val inflight = CounterUpDown(generalSlotCount + ctrlLoopbackDepth + 4)
       val gsMask = Reg(Bits(generalSlotCount bits))
 
-      IDLE.whenIsActive(when(start)(goto(CMD)))
+      val WAIT = new StateDelay(cyclesCount = 50) {
+        whenCompleted {
+          goto(CMD)
+        }
+      }
+
+      IDLE.whenIsActive(when(start) {
+        idle := False
+        goto(WAIT)
+      })
 
       CMD whenIsActive {
         when(cmd.fire) {
@@ -413,6 +433,7 @@ class Cache(val p : CacheParam) extends Component {
       GS whenIsActive {
         when(gsMask === 0) {
           reserved := False
+          idle := True
           goto(IDLE)
         }
       }
@@ -459,6 +480,7 @@ class Cache(val p : CacheParam) extends Component {
     mapper.read(flush.reserved || withSelfFlush.mux(selfFlusher.isActive(selfFlusher.CMD), False), 0x08)
     mapper.writeMultiWord(flush.address, 0x10)
     mapper.writeMultiWord(flush.upTo, 0x18)
+    mapper.read(flush.idle, 0x20)
   }
 
   val fromUpA = new Area{
@@ -525,6 +547,10 @@ class Cache(val p : CacheParam) extends Component {
   val prober = new SlotPool(probeCount)(new ProberSlot){
     val ctx = new Area{
       val ram = Mem.fill(probeCount)(new CtrlCmd())
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
 
@@ -731,8 +757,8 @@ class Cache(val p : CacheParam) extends Component {
     val tags = new Area{
       import tagStage._
       val read = tagStage(CACHE_TAGS)
-      val CACHE_HITS  = insert(read.map(t => t.loaded && t.tag === CTRL_CMD.address(tagRange)).asBits)
-      val SOURCE_HITS = insert(read.map(t => (t.owners & inserter.SOURCE_OH).orR).asBits)
+      val CACHE_HITS  = insert(read.map { t => t.loaded && t.tag === CTRL_CMD.address(tagRange)}.asBits)
+      val SOURCE_HITS = insert(read.map { t => (t.owners & inserter.SOURCE_OH).orR}.asBits)
     }
 
     val preCtrl = new Area{

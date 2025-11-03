@@ -48,6 +48,10 @@ object ContextAsyncBufferFull extends ContextAsyncBufferFactory{
 }
 class ContextAsyncBufferFull[T <: Data](idWidth : Int, contextType : HardType[T]) extends ContextAsyncBufferBase[T](idWidth, contextType){
   val contexts = Mem.fill(1 << idWidth)(contextType)
+  contexts.initBigInt(List.fill(contexts.wordCount)(0))
+  if(GlobalData.get.config.device == Device.ASIC) {
+    contexts.technology = registerFile
+  }
   val write = contexts.writePort()
   write.valid   := io.add.valid
   write.address := io.add.id

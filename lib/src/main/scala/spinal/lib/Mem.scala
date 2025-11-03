@@ -121,6 +121,15 @@ class MemPimped[T <: Data](mem: Mem[T]) {
     ret
   }
 
+  def readSyncPortMuxed(readUnderWrite: ReadUnderWritePolicy = dontCare, clockCrossing: Boolean = false) : MemReadPort[T] = {
+    val ret : MemReadPort[T] = MemReadPort(mem.wordType(),mem.addressWidth)
+    ret.rsp := mem.readSync(ret.cmd.payload,ret.cmd.valid, readUnderWrite, clockCrossing)
+    when (!ret.cmd.valid) {
+      ret.rsp.assignDontCare()
+    }
+    ret
+  }
+
   def readAsyncPort() : MemReadPortAsync[T] = {
     val ret : MemReadPortAsync[T] = MemReadPortAsync(mem.wordType(),mem.addressWidth)
     ret.data := mem.readAsync(ret.address)
