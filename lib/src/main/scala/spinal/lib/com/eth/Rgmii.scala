@@ -19,9 +19,10 @@ case class RgmiiTx() extends Bundle with IMasterSlave {
   val ctl = Bool()
   val d = Bits(4 bits)
 
-  override def asMaster(): Unit = out(clk, ctl, d)
-
-  clk := ClockDomain.current.readClockWire
+  override def asMaster(): Unit = {
+    in(clk)
+    out(ctl, d)
+  }
 
   def fromTxStream() = new Area {
     val interframe = MacTxInterFrame(8)
@@ -47,7 +48,9 @@ case class RgmiiRx() extends Bundle with IMasterSlave {
   val d = Bits(4 bits)
   val ctl = Bool()
 
-  override def asMaster(): Unit = out(clk, d, ctl)
+  override def asMaster(): Unit = {
+    out(clk, d, ctl)
+  }
 
   def toRxFlow() = {
     val dataDDR = DDRInput(4)
