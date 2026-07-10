@@ -48,7 +48,7 @@ case class GenericDDROut(width: Int) extends Component with DDROutput {
     d := io.d1
   }
 
-  val fallingArea = new ClockingArea(ClockDomain.current.withRevertedClockEdge()) {
+  val fallingArea = new Area {
     val d = Reg(Bits(width bits)) init(0)
     d := io.d2
   }
