@@ -59,11 +59,13 @@ object Axi4ToApb3BridgePhase extends SpinalEnum{
 }
 
 
-case class Axi4SharedToApb3Bridge(addressWidth: Int, dataWidth: Int, idWidth: Int) extends Component {
+case class Axi4SharedToApb3Bridge(addressWidth: Int, dataWidth: Int, idWidth: Int,
+                                  patchConfigs: ((Axi4Config, Apb3Config)) => (Axi4Config, Apb3Config) = identity
+                                 ) extends Component {
 
   import Axi4ToApb3BridgePhase._
 
-  val (axiConfig,apbConfig) = Axi4SharedToApb3Bridge.getConfigs(addressWidth,dataWidth,idWidth)
+  val (axiConfig,apbConfig) = patchConfigs(Axi4SharedToApb3Bridge.getConfigs(addressWidth,dataWidth,idWidth))
 
   val io = new Bundle{
     val axi = slave (Axi4Shared(axiConfig))
@@ -73,7 +75,7 @@ case class Axi4SharedToApb3Bridge(addressWidth: Int, dataWidth: Int, idWidth: In
   val phase      = RegInit(SETUP)
   val write      = Reg(Bool())
   val readedData = Reg(Bits(dataWidth bits))
-  val id         = Reg(UInt(idWidth bits))
+  val id: UInt   = axiConfig.useId generate Reg(UInt(idWidth bits))
 
   io.axi.sharedCmd.ready    := False
   io.axi.writeData.ready    := False
@@ -86,7 +88,7 @@ case class Axi4SharedToApb3Bridge(addressWidth: Int, dataWidth: Int, idWidth: In
   switch(phase){
     is(SETUP){
       write := io.axi.sharedCmd.write
-      id    := io.axi.sharedCmd.id
+      if (axiConfig.useId) id    := io.axi.sharedCmd.id
 
       when(io.axi.sharedCmd.valid && (!io.axi.sharedCmd.write || io.axi.writeData.valid)) {
         phase := ACCESS
@@ -135,8 +137,10 @@ case class Axi4SharedToApb3Bridge(addressWidth: Int, dataWidth: Int, idWidth: In
 
   io.axi.readRsp.resp  := io.apb.PSLVERROR ## B"0"
   io.axi.writeRsp.resp := io.apb.PSLVERROR ## B"0"
-  io.axi.readRsp.id    := id
-  io.axi.writeRsp.id   := id
+  if (axiConfig.useId) {
+    io.axi.readRsp.id    := id
+    io.axi.writeRsp.id   := id
+  }
   io.axi.readRsp.data  := readedData
   io.axi.readRsp.last  := True
 }
