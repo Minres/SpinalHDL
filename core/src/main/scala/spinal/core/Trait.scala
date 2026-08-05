@@ -43,6 +43,12 @@ object FAILURE  extends AssertNodeSeverity
 
 object REPORT_TIME
 
+object ReportSourceLocation {
+  def prefix(format: String, loc: Location, severity: AssertNodeSeverity): String = {
+    spinal.core.internals.ReportFormatting.renderPrefix(format, loc, severity)
+  }
+}
+
 /** Min max base function */
 trait MinMaxProvider {
   def minValue: BigInt
@@ -102,14 +108,21 @@ object OnCreateStack extends ScopeProperty[Nameable => Unit]{
   */
 class GlobalData(val config : SpinalConfig) {
 
-  private var algoIncrementale = 1
+  private var algoIncremental = 1
   var toplevel : Component = null
   var report : SpinalReport[Component] = null
 
+
+  // TODO enable deprecation
+  //@deprecated("Use correctly spelled 'allocateAlgoIncremental' instead", since = "1.15.0")
   def allocateAlgoIncrementale(): Int = {
-    assert(algoIncrementale != Integer.MAX_VALUE)
-    algoIncrementale += 1
-    return algoIncrementale - 1
+    allocateAlgoIncremental()
+  }
+
+  def allocateAlgoIncremental(): Int = {
+    assert(algoIncremental != Integer.MAX_VALUE)
+    algoIncremental += 1
+    return algoIncremental - 1
   }
 
   var anonymSignalPrefix: String = null
@@ -439,8 +452,13 @@ trait Nameable extends OwnableRef with ContextUser {
 
   private[core] def getNameElseThrow: String = {
     getName(null) match {
-      case null =>  throw new Exception("Internal error")
-      case name =>  name
+      case null => {
+        val errorMessage =
+          s"Signal $this has no name but is used in a context where a name is required. " +
+          s"Location of the signal: \n${getScalaLocationLong}. "
+        SpinalError(errorMessage)
+      }
+      case name => name
     }
   }
 
@@ -838,7 +856,16 @@ object unusedTag                     extends SpinalTag
 object noCombinatorialLoopCheck      extends SpinalTag
 object noLatchCheck                  extends SpinalTag
 object noBackendCombMerge            extends SpinalTag
+object reportIncludeSourceLocation   extends SpinalTag{ override def allowMultipleInstance = false }
+case class reportSourceLocationFormatTag(format: String) extends SpinalTag{
+  override def allowMultipleInstance = false
+}
+
+/** Tag for clock crossing signals
+  * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Structuring/clock_domain.html#clock-domain-crossing Clock domain crossing documentation]]
+  */
 object crossClockDomain              extends SpinalTag{ override def moveToSyncNode = true }
+
 object crossClockBuffer              extends SpinalTag{ override def moveToSyncNode = true }
 
 sealed trait TimingEndpointType

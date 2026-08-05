@@ -7,16 +7,22 @@ import spinal.idslplugin.Location
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
+
+/** A stage from a deprecated API.
+  * 
+  * The new ``spinal.lib.misc.pipeline`` API should be used instead.
+  * Its documentation: [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Libraries/Pipeline/introduction.html]]
+  */
 class Stage(implicit _pip: Pipeline = null)  extends Area {
   if(_pip != null) {
     _pip.addStage(this)
   }
 
-  def chainConnect(connection: ConnectionLogic): Unit ={
+  def chainConnect(connection: ConnectionLogic): Unit = {
     _pip.connect(_pip.stagesSet.takeWhile(_ != this).last, this)(connection)
   }
 
-  def this(connection: ConnectionLogic)(implicit _pip: Pipeline)  {
+  def this(connection: ConnectionLogic)(implicit _pip: Pipeline) {
     this()
     chainConnect(connection)
   }
@@ -32,15 +38,15 @@ class Stage(implicit _pip: Pipeline = null)  extends Area {
     val doHalt = isValid && cond && !isReady
     stage.haltIt(doHalt)
 
-    val fired = !syncronous generate new Area{
-      val done = RegInit(False) setWhen(isFireing) clearWhen(isChanging)
+    val fired = !syncronous generate new Area {
+      val done = RegInit(False) setWhen(isFiring) clearWhen(isChanging)
       when(done){
         doHalt := False
         isValid := False
       }
     }
 
-    for(value <- values){
+    for(value <- values) {
       self(value).assignFrom(stage(value))
     }
   }
@@ -157,7 +163,7 @@ class Stage(implicit _pip: Pipeline = null)  extends Area {
   def forkIt(cond : Bool)(implicit loc: Location) : Unit = internals.request.forks += nameFromLocation(CombInit(cond), "forkRequest")
   def spawnIt(cond : Bool)(implicit loc: Location) : Unit = internals.request.spawns += nameFromLocation(CombInit(cond), "spawnRequest")
 
-  //Not being root will not clear the output valid of the stage, which can be quite usefull
+  // Not being root will not clear the output valid of the stage, which can be quite useful.
   def flushIt(cond : Bool, root : Boolean = true) : Unit = {
     internals.request.flush += cond
     if(root) internals.request.flushRoot += cond
@@ -165,7 +171,12 @@ class Stage(implicit _pip: Pipeline = null)  extends Area {
   def flushNext(cond : Bool) : Unit =  internals.request.flushNext += cond
   def removeIt(): Unit = ???
   def isValid: Bool = internals.input.valid
-  def isFireing: Bool = signalCache(this -> "isFireing")(isValid && isReady).setCompositeName(this, "isFireing")
+
+  @deprecated("Use isFiring instead", "")
+  def isFireing: Bool = isFiring
+
+  def isFiring: Bool = signalCache(this -> "isFiring")(isValid && isReady).setCompositeName(this, "isFiring")
+
   def isFirstCycle: Bool = {
     val wait = RegInit(False) setWhen(isValid) clearWhen(isReady || isFlushed)
     val ret = isValid && !wait
@@ -184,7 +195,7 @@ class Stage(implicit _pip: Pipeline = null)  extends Area {
     if(internals.arbitration.isFlushed == null) internals.arbitration.isFlushed = ContextSwapper.outsideCondScopeData(Bool())
     internals.arbitration.isFlushed
   }
-  //So, not realy well named, as it just check if a transaction is moving to the next stage (output.valid && output.ready)
+  // So, not really well named, as it just check if a transaction is moving to the next stage (output.valid && output.ready).
   def isForked : Bool = {
     if(internals.arbitration.isForked == null) internals.arbitration.isForked = ContextSwapper.outsideCondScopeData(Bool())
     internals.arbitration.isForked

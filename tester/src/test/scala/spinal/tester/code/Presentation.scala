@@ -329,7 +329,7 @@ object C10_2 {
     val io = new Bundle {
       val cfgPort = slave Flow Fragment(Bits(8 bit))
     }
-    val waitTrigger = io.cfgPort filterHeader (0x01) toRegOf (Bool) init (False)
+    val waitTrigger = io.cfgPort filterHeader (0x01) toRegOf (Bool()) init (False)
     val userTrigger = io.cfgPort pulseOn (0x02)
     val configs = io.cfgPort filterHeader (0x0F) toRegOf (LogicAnalyserConfig())
   }
@@ -380,7 +380,7 @@ object C10_removed {
 
 
   //Memory of 1024 Bool
-  val mem = Mem(Bool, 1024)
+  val mem = Mem(Bool(), 1024)
 
   //Write it
   mem(5) := True
@@ -782,16 +782,16 @@ object t8_a {
   //      val bus = slave(new Apb3(apbConfig))
   //      val uart = master(Uart())
   //    }
-  //    val busCtrl = new Apb3SlaveController(io.bus) //This is a APB3 slave controller builder tool
+  //    val busCtrl = new Apb3SlaveController(io.bus) // This is a APB3 slave controller builder tool
   //
-  //    val config = busCtrl.writeOnlyRegOf(UartCtrlConfig(), 0x10) //Create a write only configuration register at address 0x10
+  //    val config = busCtrl.writeOnlyRegOf(UartCtrlConfig(), 0x10) // Create a write-only configuration register at address 0x10
   //    val writeStream = busCtrl.writeStreamOf(Bits(8 bit), 0x20)
   //    val readStream = busCtrl.readStreamOf(Bits(8 bit), 0x30)
   //
   //    val uartCtrl = new UartCtrl()
   //    uartCtrl.io.config := config
-  //    uartCtrl.io.write <-< writeStream //Pipelined connection
-  //    uartCtrl.io.read.toStream.queue(16) >> readStream  //Queued connection
+  //    uartCtrl.io.write <-< writeStream // Pipelined connection
+  //    uartCtrl.io.read.toStream.queue(16) >> readStream  // Queued connection
   //    uartCtrl.io.uart <> io.uart
   //  }
 }
@@ -850,8 +850,8 @@ object t10 {
   val arrayOfUInt = Vec(UInt(5 bit), 16)
   val sumOfUInt = arrayOfUInt.fold(U(0, 9 bit))(_ + _)
 
-  val arrayOfStreamA = Vec(Stream(Bool), 10)
-  val arrayOfStreamB = Vec(Stream(Bool), 10)
+  val arrayOfStreamA = Vec(Stream(Bool()), 10)
+  val arrayOfStreamB = Vec(Stream(Bool()), 10)
   (arrayOfStreamA, arrayOfStreamB).zipped.foreach(_ >> _)
 
   for (i <- 0 to 10) {
@@ -1868,25 +1868,25 @@ object SementicAD{
 }
 
 
-object PlayAxiLiteFactory{
-  //Create a new AxiLite4 bus
+object PlayAxiLiteFactory {
+  // Create a new AxiLite4 bus
   val axiLiteConfig = AxiLite4Config(
     addressWidth =  12,
     dataWidth = 32
   )
   val bus = AxiLite4(axiLiteConfig)
 
-  //Create the factory which is able to create some bridging logic between the bus and some hardware
+  // Create the factory which is able to create some bridging logic between the bus and some hardware
   val factory = new AxiLite4SlaveFactory(bus)
 
-  //Create 'a' and 'b' as write only register
+  // Create 'a' and 'b' as write-only register
   val a = factory.createWriteOnly(UInt(32 bits), address = 0)
   val b = factory.createWriteOnly(UInt(32 bits), address = 4)
 
-  //Do some calculation
+  // Do some calculation
   val result = a * b
 
-  //Make 'result' readable by the bus
+  // Make 'result' readable by the bus
   factory.read(result(31 downto 0), address = 8)
 }
 
@@ -1955,7 +1955,7 @@ object PlayAdder2{
     uint8 := uint12.resize(8)
     uint8 := uint12.resized
     uint8 := uint12(7 downto 0)
-    uint8 := uint12(uint8.range)
+    uint8 := uint12(uint8.bitsRange)
 
     val bits4 = Bits(4 bits)
     uint8 := bits4.asUInt.resized
@@ -2152,7 +2152,7 @@ object Summit extends App{
 
 object Ccc37A {
 
-  class Timer extends Component {
+  class MyTimer extends Component {
     val increment = in Bool()
     val counter = Reg(UInt(8 bits)) init(0)
     val full = counter === 255

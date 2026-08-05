@@ -334,6 +334,43 @@ class Ram_1wrs(
 }
 
 
+class Ram_1wra(
+  val wordWidth      : Int,
+  val wordCount      : Int,
+  val technology     : MemTechnologyKind,
+  val readUnderWrite : ReadUnderWritePolicy = dontCare,
+  val duringWrite    : DuringWritePolicy = dontCare,
+  val maskWidth      : Int,
+  val maskEnable     : Boolean
+) extends BlackBox {
+
+  if (readUnderWrite == readFirst) SpinalError("readFirst mode for asynchronous read is not allowed")
+
+  addGenerics(
+    "wordCount"      -> Ram_1wra.this.wordCount,
+    "wordWidth"      -> Ram_1wra.this.wordWidth,
+    "readUnderWrite" -> Ram_1wra.this.readUnderWrite.readUnderWriteString,
+    "duringWrite"    -> Ram_1wra.this.duringWrite.duringWriteString,
+    "technology"     -> Ram_1wra.this.technology.technologyKind,
+    "maskWidth"      -> Ram_1wra.this.maskWidth,
+    "maskEnable"     -> Ram_1wra.this.maskEnable
+  )
+
+  val io = new Bundle {
+    val clk    =  in Bool()
+    val en     =  in Bool()
+    val wr     =  in Bool()
+    val addr   =  in UInt(log2Up(wordCount) bit)
+    val mask   =  in Bits(maskWidth bits)
+    val wrData =  in Bits(wordWidth bit)
+    val rdData = out Bits(wordWidth bit)
+  }
+
+  mapCurrentClockDomain(io.clk)
+  noIoPrefix()
+}
+
+
 class Ram_2wrs(
   val wordWidth            : Int,
   val wordCount            : Int,
@@ -425,8 +462,8 @@ class Ram_Generic(val topo : MemTopology, utils : PhaseMemBlackBoxingWithPolicy)
     val clk  = in Bool()
     val en   = in Bool()
     val mask = in Bits(maskWidth bits)
-    val addr = in UInt(p.address.getWidth bits)
-    val data = in Bits(p.data.getWidth bits)
+    val addr = in UInt(p.getAddressWidth bits)
+    val data = in Bits(p.getWidth bits)
     mapClockDomain(p.clockDomain, clk)
 
     parent.rework{
@@ -440,7 +477,7 @@ class Ram_Generic(val topo : MemTopology, utils : PhaseMemBlackBoxingWithPolicy)
   val rs = for(p <- topo.readsSync) yield new Area{
     val clk  = in Bool()
     val en   = in Bool()
-    val addr = in UInt(p.address.getWidth bits)
+    val addr = in UInt(p.getAddressWidth bits)
     val data = out Bits(p.getWidth bits)
     mapClockDomain(p.clockDomain, clk)
     parent.rework{
@@ -451,7 +488,7 @@ class Ram_Generic(val topo : MemTopology, utils : PhaseMemBlackBoxingWithPolicy)
   }
 
   val ra = for(p <- topo.readsAsync) yield new Area{
-    val addr = in UInt(p.address.getWidth bits)
+    val addr = in UInt(p.getAddressWidth bits)
     val data = out Bits(p.getWidth bits)
     parent.rework {
       addr.assignFrom(p.address)
@@ -465,13 +502,33 @@ class Ram_Generic(val topo : MemTopology, utils : PhaseMemBlackBoxingWithPolicy)
     val en   = in Bool()
     val wr   = in Bool()
     val mask = in Bits(maskWidth bits)
-    val addr = in UInt(p.address.getWidth bits)
-    val wrData = in Bits(p.data.getWidth bits)
+    val addr = in UInt(p.getAddressWidth bits)
+    val wrData = in Bits(p.getWidth bits)
     val rdData = out Bits(p.getWidth bits)
     mapClockDomain(p.clockDomain, clk)
     parent.rework {
       addr.assignFrom(p.address)
       en.assignFrom(wrapBool(p.chipSelect) && p.clockDomain.isClockEnableActive)
+      wr.assignFrom(p.writeEnable)
+      wrData.assignFrom(p.data)
+      mask.assignFrom((if (p.mask != null) p.mask else B"1"))
+      wrapConsumers(p, rdData)
+    }
+  }
+
+  val raw = for(p <- topo.readAsyncWrite) yield new Area{
+    val maskWidth = p.getMaskWidth()
+    val clk  = in Bool()
+    val en   = in Bool()
+    val wr   = in Bool()
+    val mask = in Bits(maskWidth bits)
+    val addr = in UInt(p.getAddressWidth bits)
+    val wrData = in Bits(p.getWidth bits)
+    val rdData = out Bits(p.getWidth bits)
+    mapClockDomain(p.clockDomain, clk)
+    parent.rework {
+      addr.assignFrom(p.address)
+      en.assignFrom(p.clockDomain.isClockEnableActive)
       wr.assignFrom(p.writeEnable)
       wrData.assignFrom(p.data)
       mask.assignFrom((if (p.mask != null) p.mask else B"1"))

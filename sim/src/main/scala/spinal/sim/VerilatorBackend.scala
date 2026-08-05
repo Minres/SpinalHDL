@@ -100,6 +100,7 @@ class VerilatorBackend(val config: VerilatorBackendConfig) extends Backend {
 #include <memory>
 #include <jni.h>
 #include <iostream>
+#include <verilated.h>
 
 #include "V${config.toplevelName}.h"
 #ifdef TRACE
@@ -108,6 +109,10 @@ class VerilatorBackend(val config: VerilatorBackendConfig) extends Backend {
 #include "V${config.toplevelName}__Syms.h"
 
 using namespace std;
+
+#if defined(VERILATOR_VERSION_INTEGER) && (VERILATOR_VERSION_INTEGER >= 5047000)
+using WData = EData;
+#endif
 
 class ISignalAccess{
 public:
@@ -255,7 +260,7 @@ public:
     uint32_t timeCheck;
     bool waveEnabled;
     bool gotFinish;
-    //VerilatedContext* contextp; //Buggy in multi threaded spinalsim
+    VerilatedContext* contextp;  // Restore context support
     V${config.toplevelName} *top;
     ISignalAccess *signalAccess[${config.signals.length}];
     #ifdef TRACE
@@ -263,11 +268,15 @@ public:
 	  #endif
     string name;
     int32_t time_precision;
+    std::string wavePath;
 
     Wrapper_${uniqueId}(const char * name, const char * wavePath, int seed){
-      //contextp = new VerilatedContext;
-      Verilated::randReset(2);
-      Verilated::randSeed(seed);
+      this->wavePath = wavePath;
+
+      contextp = new VerilatedContext;
+      contextp->randReset(2);
+      contextp->randSeed(seed);
+      
       // Verilator v5.026+ calls time() inside Vtop::Vtop()
       // initialize the simHandle before we call Vtop
       simHandle${uniqueId} = this;
@@ -284,11 +293,11 @@ ${    val signalInits = for((signal, id) <- config.signals.zipWithIndex) yield {
       else if(signal.dataType.width <= 32) "IData"
       else if(signal.dataType.width <= 64) "QData"
       else "WData"
-      val enforcedCast = if(signal.dataType.width > 64) "(WData*)" else ""
+      val enforcedCast = if(signal.dataType.width > 64) ".data()" else ""
       val signalReference = s"top->${signal.path.map(_.replace("$", "__024").replace("__", "___05F")).mkString("->")}"
       val memPatch = if(signal.dataType.isMem) "[0]" else ""
 
-      s"      signalAccess[$id] = new ${typePrefix}SignalAccess($enforcedCast $signalReference$memPatch ${if(signal.dataType.width > 64) s" , ${signal.dataType.width}, ${if(signal.dataType.isInstanceOf[SIntDataType]) "true" else "false"}" else ""});\n"
+      s"      signalAccess[$id] = new ${typePrefix}SignalAccess($signalReference$memPatch$enforcedCast ${if(signal.dataType.width > 64) s" , ${signal.dataType.width}, ${if(signal.dataType.isInstanceOf[SIntDataType]) "true" else "false"}" else ""});\n"
 
     }
 
@@ -304,19 +313,21 @@ ${    val signalInits = for((signal, id) <- config.signals.zipWithIndex) yield {
       this->time_precision = ${if (useTimePrecision) "Verilated::timeprecision()" else "VL_TIME_PRECISION" };
     }
 
-    virtual ~Wrapper_${uniqueId}(){
-      for(int idx = 0;idx < ${config.signals.length};idx++){
-          delete signalAccess[idx];
-      }
-
+    void close(){
       #ifdef TRACE
       if(waveEnabled) tfp.dump((vluint64_t)time);
       tfp.flush();
       tfp.close();
       #endif
       #ifdef COVERAGE
-      VerilatedCov::write((("${new File(config.vcdPath).getAbsolutePath.replace("\\","\\\\")}/${if(config.vcdPrefix != null) config.vcdPrefix + "_" else ""}") + name + ".dat").c_str());
+      VerilatedCov::write((wavePath + "${if(config.vcdPrefix != null) config.vcdPrefix + "_" else ""}" + "coverage.dat").c_str());
       #endif
+    }
+
+    virtual ~Wrapper_${uniqueId}(){
+      for(int idx = 0;idx < ${config.signals.length};idx++){
+          delete signalAccess[idx];
+      }
 
       // Verilated::runFlushCallbacks();
       // Verilated::runExitCallbacks();
@@ -324,7 +335,7 @@ ${    val signalInits = for((signal, id) <- config.signals.zipWithIndex) yield {
       //contextp->threadContextp()->gotFinish(true);
       top->final();
       delete top;
-      //delete contextp;
+      delete contextp;
     }
 
 };
@@ -430,6 +441,11 @@ JNIEXPORT void API JNICALL ${jniPrefix}setU64mem_1${uniqueId}
 JNIEXPORT void API JNICALL ${jniPrefix}deleteHandle_1${uniqueId}
   (JNIEnv *, jobject, Wrapper_${uniqueId} * handle){
   delete handle;
+}
+
+JNIEXPORT void API JNICALL ${jniPrefix}close_1${uniqueId}
+  (JNIEnv *, jobject, Wrapper_${uniqueId} * handle){
+  handle->close();
 }
 
 JNIEXPORT void API JNICALL ${jniPrefix}getAU8_1${uniqueId}
@@ -548,7 +564,6 @@ JNIEXPORT void API JNICALL ${jniPrefix}disableWave_1${uniqueId}
        | --output-split-ctrace 500
        | -Wno-WIDTH -Wno-UNOPTFLAT -Wno-CMPCONST -Wno-UNSIGNED
        | --x-assign unique
-       | --x-initial-edge
        | --trace-depth ${config.waveDepth}
        | -O3
        | -CFLAGS -O${config.optimisationLevel}
@@ -734,6 +749,7 @@ JNIEXPORT void API JNICALL ${jniPrefix}disableWave_1${uniqueId}
          |    public void setAU8(long handle, int id, byte[] value, int length) { setAU8_${uniqueId}(handle, id, value, length);}
          |    public void setAU8_mem(long handle, int id, byte[] value, int length, long index) { setAU8mem_${uniqueId}(handle, id, value, length, index);}
          |    public void deleteHandle(long handle) { deleteHandle_${uniqueId}(handle);}
+         |    public void close(long handle) { close_${uniqueId}(handle);}
          |    public void enableWave(long handle) { enableWave_${uniqueId}(handle);}
          |    public void disableWave(long handle) { disableWave_${uniqueId}(handle);}
          |
@@ -751,6 +767,7 @@ JNIEXPORT void API JNICALL ${jniPrefix}disableWave_1${uniqueId}
          |    public native void setAU8_${uniqueId}(long handle, int id, byte[] value, int length);
          |    public native void setAU8mem_${uniqueId}(long handle, int id, byte[] value, int length, long index);
          |    public native void deleteHandle_${uniqueId}(long handle);
+         |    public native void close_${uniqueId}(long handle);
          |    public native void enableWave_${uniqueId}(long handle);
          |    public native void disableWave_${uniqueId}(long handle);
          |

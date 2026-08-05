@@ -66,8 +66,8 @@ package object sim {
 
 
   private def btToSignal(manager: SimManager, bt: BaseNode) = {
-    if(bt.algoIncrementale != -1){
-      SimError(s"UNACCESSIBLE SIGNAL : $bt isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
+    if(bt.algoIncremental != -1){
+      SimError(s"UNACCESSIBLE SIGNAL : $bt isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.\nIf that doesn't resolve the issue, ensure that the signal has a name. (you can force a name via : mySignal.setName(...) durring the hardware elaboration)")
     }
 
     manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](bt.algoInt)
@@ -88,7 +88,7 @@ package object sim {
       }
       case Some(tag) => {
         for(i <- 0 until tag.mapping.size; mapping = tag.mapping(i)){
-          if(mem.algoIncrementale != -1){
+          if(mem.algoIncremental != -1){
             SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
           }
           val symbol = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](mem.algoInt + i)
@@ -114,7 +114,7 @@ package object sim {
       case Some(tag) => {
         var data = BigInt(0)
         for(i <- 0 until tag.mapping.size; mapping = tag.mapping(i)){
-          if(mem.algoIncrementale != -1){
+          if(mem.algoIncremental != -1){
             SimError(s"UNACCESSIBLE SIGNAL : $mem isn't accessible during the simulation.\n- To fix it, call simPublic() on it during the elaboration.")
           }
           val symbol = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](mem.algoInt + i)
@@ -284,23 +284,51 @@ package object sim {
     }
   }
 
+  /**
+    * Register the `body` code to be called at a simulation time `delay` steps
+    * after the current timestep.
+    */
   def delayed(delay : Long)(body : => Unit) = {
     SimManagerContext.current.manager.schedule(delay)(body)
   }
 
+  /**
+    * Register the `body` code to be called at a simulation duration `delay`
+    * after the current timestep.
+    */
   def delayed(delay: TimeNumber)(body: => Unit) = {
     SimManagerContext.current.manager.schedule(timeToLong(delay))(body)
   }
 
-  def periodicaly(delay : Long)(body : => Unit) : Unit = {
+  /**
+    * Register `body` for call periodically each `delay` simulation step from
+    * current timestep.
+    */
+  def periodically(delay : Long)(body : => Unit) : Unit = {
     SimManagerContext.current.manager.schedule(delay){
       body
-      periodicaly(delay)(body)
+      periodically(delay)(body)
     }
   }
 
-  def periodicaly(delay : TimeNumber)(body : => Unit) : Unit = {
-    periodicaly(timeToLong(delay))(body)
+  // TODO enable deprecation
+  //@deprecated("Use correctly spelled 'periodically' instead", since = "1.15.0")
+  def periodicaly(delay: Long)(body: => Unit): Unit = {
+    periodically(delay)(body)
+  }
+
+  /**
+    * Register `body` for call periodically each `delay` simulation duration from
+    * current timestep.
+    */
+  def periodically(delay : TimeNumber)(body : => Unit) : Unit = {
+    periodically(timeToLong(delay))(body)
+  }
+
+  // TODO enable deprecation
+  //@deprecated("Use correctly spelled 'periodically' instead", since = "1.15.0")
+  def periodicaly(delay : TimeNumber)(body: => Unit): Unit = {
+    periodically(delay)(body)
   }
 
   def simThread = SimManagerContext.current.thread
@@ -409,6 +437,7 @@ package object sim {
   implicit class SimBoolPimper(bt: Bool) extends SimEquiv {
     def simProxy() = new SimProxy(bt)
     class SimProxy(bt : Bool){
+      assert(bt.isNamed)
       val manager = SimManagerContext.current.manager
       val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](bt.algoInt)
       def toBoolean = manager.getLong(signal) != 0
@@ -429,7 +458,7 @@ package object sim {
     
     /** Assign a hardware ``Bool`` from an Scala ``Boolean``
       *
-      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
       */
     def #=(value: Boolean) = setLong(bt, if(value) 1 else 0)
     
@@ -446,7 +475,7 @@ package object sim {
     
     /** Assign a hardware ``BitVector`` from an Scala ``Long``
       *
-      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
       */
     def #=(value: Long) = setLong(bt, value)
 
@@ -464,7 +493,7 @@ package object sim {
     
     /** Assign a hardware ``BitVector`` from an Scala ``Array[Byte]``
       *
-      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
       */
     def #=(value: Array[Byte])    = {
       var acc = BigInt(0)
@@ -483,7 +512,7 @@ package object sim {
 
     /** Assign a hardware ``BitVector`` from an Scala ``Array[Boolean]``
       *
-      * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
       */
     def #=(value: Array[Boolean]) = {
       var acc = BigInt(0)
@@ -508,16 +537,17 @@ package object sim {
   implicit class SimBitVectorPimper(bt: BitVector) {
     def simProxy() = new SimProxy(bt)
     class SimProxy(bt : BitVector){
+      val alwaysZero = bt.getBitsWidth <= 0
+      assert(bt.isNamed)
       val manager = SimManagerContext.current.manager
       val signal = manager.raw.userData.asInstanceOf[ArrayBuffer[Signal]](bt.algoInt)
-      val alwaysZero = bt.getBitsWidth == 0
       def toInt = if(alwaysZero) 0 else manager.getInt(signal)
       def toLong = if(alwaysZero) 0 else manager.getLong(signal)
       def toBigInt = if(alwaysZero) 0 else manager.getBigInt(signal)
 
       /** Assign a hardware ``BitVector`` from an Scala ``Int``
         *
-        * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+        * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
         */
       def #=(value: Int) : Unit  = {
         if(alwaysZero) {
@@ -529,7 +559,7 @@ package object sim {
 
       /** Assign a hardware ``BitVector`` from an Scala ``Long``
         *
-        * [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+        * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
         */      
       def #=(value: Long) : Unit  = {
         if(alwaysZero) {
@@ -552,6 +582,18 @@ package object sim {
     def toBigInt: BigInt = getBigInt(bt)
     def toBytes: Array[Byte] = SimEquivBitVectorBytesPimper(bt).getSim
     def toBooleans : Array[Boolean] = SimEquivBitVectorBooleansPimper(bt).getSim
+
+    /** Set all bits of the BitVector to 1 during simulation
+      *
+      * @see [[https://spinalhdl.github.io/SpinalDoc-RTD/master/SpinalHDL/Simulation/signal.html#read-and-write-signals Simulation documentation]]
+      */
+    def simSetAll(): Unit = {
+      val width = bt.getBitsWidth
+      if (width <= 0) return
+
+      val allOnesValue = (BigInt(1) << width) - 1
+      bt #= allOnesValue
+    }
   }
 
   object SimUnionElementPimper {
@@ -565,6 +607,7 @@ package object sim {
       new SimUnionElementPimper.PendingAssign())
 
     class SimProxy[E <: Data](rawBits: Bits, e: E) {
+      assert(rawBits.parentScope != null)
       var offset = 0
       breakable {
         for (ee <- dummyData.flatten) {

@@ -6,7 +6,7 @@ import spinal.lib.bus.amba4.axi._
 import spinal.lib.bus.misc.SizeMapping
 
 object Axi4Bridge{
-  def getAxi4Config(p : NodeParameters, withAxi3 : Boolean): Axi4Config ={
+  def getAxi4Config(p : NodeParameters, withAxi3 : Boolean, forceAxi4Len : Boolean): Axi4Config ={
     assert(!p.withBCE)
     assert(p.m.emits.isOnlyGetPut())
     Axi4Config(
@@ -19,7 +19,8 @@ object Axi4Bridge{
       useProt      = false,
       useRegion    = false,
       useAllStrb   = true,
-      withAxi3     = withAxi3
+      withAxi3     = withAxi3,
+      forceAxi4Len = forceAxi4Len
     )
   }
 
@@ -28,8 +29,8 @@ object Axi4Bridge{
   )
 }
 
-class Axi4Bridge(p : NodeParameters, withAxi3 : Boolean = false) extends Component{
-  val axiConfig = Axi4Bridge.getAxi4Config(p, withAxi3)
+class Axi4Bridge(p : NodeParameters, withAxi3 : Boolean = false, forceAxi4Len : Boolean = false) extends Component{
+  val axiConfig = Axi4Bridge.getAxi4Config(p, withAxi3, forceAxi4Len)
   val io = new Bundle{
     val up = slave port Bus(p)
     val down = master port Axi4(axiConfig)
@@ -45,8 +46,8 @@ class Axi4Bridge(p : NodeParameters, withAxi3 : Boolean = false) extends Compone
 
     val (cmdFork, dataFork) = StreamFork2(halted)
     val cmd = new Area {
-      val filtred = cmdFork.takeWhen(cmdFork.isFirst())
-      val buffered = filtred.pipelined(halfRate = true)
+      val filtered = cmdFork.takeWhen(cmdFork.isFirst())
+      val buffered = filtered.pipelined(halfRate = true)
       val isGet = buffered.opcode === Opcode.A.GET
 
       io.down.aw.valid := buffered.valid && !isGet
@@ -67,8 +68,8 @@ class Axi4Bridge(p : NodeParameters, withAxi3 : Boolean = false) extends Compone
       io.down.aw.allStrb := buffered.opcode === Opcode.A.PUT_FULL_DATA
     }
     val data = new Area{
-      val filtred = dataFork.takeWhen(dataFork.opcode === Opcode.A.PUT_FULL_DATA || dataFork.opcode === Opcode.A.PUT_PARTIAL_DATA)
-      val buffer = filtred.pipelined(m2s = true)
+      val filtered = dataFork.takeWhen(dataFork.opcode === Opcode.A.PUT_FULL_DATA || dataFork.opcode === Opcode.A.PUT_PARTIAL_DATA)
+      val buffer = filtered.pipelined(m2s = true)
       io.down.w.arbitrationFrom(buffer)
       io.down.w.data := buffer.data
       io.down.w.strb := buffer.mask
@@ -110,18 +111,32 @@ class Axi4Bridge(p : NodeParameters, withAxi3 : Boolean = false) extends Compone
 
 
 object Axi4BridgeGen extends App{
+  var addressWidth = 32
+  var dataWidth = 32
+  var sourceWidth = 4
+  var sizeWidth = 3
+  assert(new scopt.OptionParser[Unit]("Axi4BridgeGen") {
+    help("help").text("prints this usage text")
+    opt[Int]("address-width") action { (v, c) => addressWidth = v }
+    opt[Int]("data-width") action { (v, c) => dataWidth = v }
+    opt[Int]("source-width") action { (v, c) => sourceWidth = v }
+    opt[Int]("size-width") action { (v, c) => sizeWidth = v }
+  }.parse(args, ()).isDefined)
+
+  val sizeMax = 1<<((1<<sizeWidth)-1)
   SpinalVerilog(new Axi4Bridge(
     new M2sParameters(
-      addressWidth = 32,
-      dataWidth = 32,
-      masters = List.fill(2)(
+      addressWidth = addressWidth,
+      dataWidth = dataWidth,
+      masters = List.fill(1)(
         M2sAgent(
           name = null,
           M2sSource(
-            id = SizeMapping(0, 16),
+            id = SizeMapping(0, 1<<sourceWidth),
             emits = M2sTransfers(
-              get = SizeRange.upTo(64),
-              putFull = SizeRange.upTo(64)
+              get = SizeRange.upTo(sizeMax),
+              putFull = SizeRange.upTo(sizeMax),
+              putPartial = SizeRange.upTo(sizeMax)
             )
           )
         )

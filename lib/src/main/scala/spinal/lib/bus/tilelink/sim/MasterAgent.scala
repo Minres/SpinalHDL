@@ -137,8 +137,8 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain)(implicit idAllocator: Id
   def allocateDebugId() = if(withIdAllocation)  idAllocator.allocate() else 0
   def freeDebugId(debugId : Long) = if(withIdAllocation) idAllocator.remove(debugId)
 
-  def getInt(source : Int, address : Long) = ByteBuffer.wrap(get(0, address, 4).data.reverse).getInt
-  def putInt(source : Int, address : Long, data : Int) = putFullData(0, address, ByteBuffer.allocate(4).putInt(data).array().reverse)
+  def getInt(source : Int, address : Long) = ByteBuffer.wrap(get(source, address, 4).data.reverse).getInt
+  def putInt(source : Int, address : Long, data : Int) = putFullData(source, address, ByteBuffer.allocate(4).putInt(data).array().reverse)
 
   def get(source : Int, address : Long, bytes : Int) : TransactionD = {
     val debugId = allocateDebugId()
@@ -270,7 +270,7 @@ class MasterAgent (val bus : Bus, val cd : ClockDomain)(implicit idAllocator: Id
         if(debug) println(f"acquireBlock src=$source%02x addr=$address%x 1 -> 0 time=${simTime()}")
         onGrant(source, address, param)
       }
-      case Opcode.D.GRANT_DATA => { //TODO on naxriscv, may sent a aquire BtoT but may have been probed out meanwhile => test
+      case Opcode.D.GRANT_DATA => { // TODO on NaxRiscv, may sent a acquire BtoT but may have been probed out meanwhile => test
         assert(!block.contains(source, address))
         onGrant(source, address, param)
         b = new Block(source, address, d.param, bytes, false, d.data){

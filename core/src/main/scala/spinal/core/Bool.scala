@@ -26,7 +26,8 @@ import spinal.idslplugin.Location
 
 /** `Bool` factory used for instance by the IODirection to create a in/out Bool() */
 trait BoolFactory {
-  @deprecated("Use `Bool()` (with braces) instead")
+  /** Deprecated, use [[Bool()]] (with braces) instead */
+  @deprecated("Use `Bool()` (with braces) instead")  
   def Bool: Bool = Bool()
 
   /** Create a new `Bool` */
@@ -196,7 +197,7 @@ class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[B
   def edge(): Bool = this ^ RegNext(this)
 
   /**
-    * Detect all edges (falling, rising, toogling)
+    * Detect all edges (falling, rising, toggling)
     * @example{{{
     *         val res = myBool.edges()
     *         when(res.fall){...}
@@ -217,7 +218,7 @@ class Bool extends BaseType with DataPrimitives[Bool]  with BaseTypePrimitives[B
     ret
   }
 
-  /** Edge detection without intial value */
+  /** Edge detection without initial value */
   def edges(): BoolEdges = {
     val ret = BoolEdges()
     val old = RegNext(this)

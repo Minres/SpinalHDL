@@ -93,7 +93,7 @@ object SpinalVerilatorBackend {
       })
 
       bt.algoInt = signalId
-      bt.algoIncrementale = -1
+      bt.algoIncremental = -1
       signal.id = signalId
       vconfig.signals += signal
       signalId += 1
@@ -107,7 +107,7 @@ object SpinalVerilatorBackend {
         case mem : Mem[_] if mem.hasTag(Verilator.public) => {
           val tag = mem.getTag(classOf[MemSymbolesTag])
           mem.algoInt = signalId
-          mem.algoIncrementale = -1
+          mem.algoIncremental = -1
           tag match {
             case None => addSignal(mem)
             case Some(tag) => {
@@ -137,7 +137,7 @@ object SpinalVerilatorBackend {
       })
 
       bt.algoInt = signalId
-      bt.algoIncrementale = -1
+      bt.algoIncremental = -1
       signal.id = signalId
       vconfig.signals += signal
       signalId += 1
@@ -394,7 +394,7 @@ object SpinalVpiBackend {
       })
 
       bt.algoInt = signalId
-      bt.algoIncrementale = -1
+      bt.algoIncremental = -1
       signal.id = signalId
       signalsCollector += signal
       signalId += 1
@@ -408,7 +408,7 @@ object SpinalVpiBackend {
         case mem : Mem[_] if mem.hasTag(SimPublic) => {
           val tag = mem.getTag(classOf[MemSymbolesTag])
           mem.algoInt = signalId
-          mem.algoIncrementale = -1
+          mem.algoIncremental = -1
           tag match {
             case None => addSignal(mem)
             case Some(tag) => {
@@ -438,7 +438,7 @@ object SpinalVpiBackend {
       })
 
       bt.algoInt = signalId
-      bt.algoIncrementale = -1
+      bt.algoIncremental = -1
       signal.id = signalId
       signalsCollector += signal
       signalId += 1
@@ -497,7 +497,7 @@ object SpinalXSimBackend {
       })
 
       bt.algoInt = signalId
-      bt.algoIncrementale = -1
+      bt.algoIncremental = -1
       signal.id = signalId
       signalsCollector += signal
       signalId += 1
@@ -675,7 +675,7 @@ case class SpinalSimConfig(
                             var _workspacePath     : String = System.getenv().getOrDefault("SPINALSIM_WORKSPACE","./simWorkspace"),
                             var _workspaceName     : String = null,
                             var _waveDepth         : Int = 0, //0 => all
-                            var _spinalConfig      : SpinalConfig = SpinalConfig(),
+                            var _spinalConfig      : SpinalConfig = SpinalConfig().includeSimulation,
                             var _optimisationLevel : Int = 0,
                             var _simulatorFlags    : ArrayBuffer[String] = ArrayBuffer[String](),
                             var _runFlags          : ArrayBuffer[String] = ArrayBuffer[String](),
@@ -930,6 +930,8 @@ case class SpinalSimConfig(
     import parser._
     opt[Unit]("trace-fst") action { (v, c) => this.withFstWave }
     opt[Unit]("trace-vcd") action { (v, c) => this.withVcdWave }
+    opt[Unit]("iverilog") action { (v, c) => this.withIVerilog }
+    opt[Unit]("no-wave") action { (v, c) => this._waveFormat = WaveFormat.NONE}
   }
 
   def doSim[T <: Component](report: SpinalReport[T])(body: T => Unit): Unit = compile(report).doSim(body)

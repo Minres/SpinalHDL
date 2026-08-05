@@ -165,9 +165,9 @@ case class MacTxBuffer(pushCd : ClockDomain,
     val lengthMinusOne = length-1
     val wordCounter = Reg(UInt(wordCountWidth bits))
     val wordCountEndAt = lengthMinusOne >> log2Up(pushWidth)
-    val spliterEndAt = lengthMinusOne(log2Up(pushWidth)-1 downto log2Up(popWidth))
+    val splitterEndAt = lengthMinusOne(log2Up(pushWidth)-1 downto log2Up(popWidth))
     val ratio = pushWidth/popWidth
-    val spliter = Reg(UInt(log2Up(ratio) bits))
+    val splitter = Reg(UInt(log2Up(ratio) bits))
 
 
     fifo.io.pop.commit := io.pop.commit
@@ -176,12 +176,12 @@ case class MacTxBuffer(pushCd : ClockDomain,
 
     io.pop.stream.valid := False
     io.pop.stream.last := False
-    io.pop.stream.data := fifo.io.pop.stream.payload.subdivideIn(popWidth bits).read(spliter)
+    io.pop.stream.data := fifo.io.pop.stream.payload.subdivideIn(popWidth bits).read(splitter)
 
     switch(state){
       is(State.LENGTH){
         wordCounter := 0
-        spliter := 0
+        splitter := 0
         when(fifo.io.pop.stream.valid){
           state := State.DATA
           length := fifo.io.pop.stream.payload.asUInt.resized
@@ -191,13 +191,13 @@ case class MacTxBuffer(pushCd : ClockDomain,
       is(State.DATA) {
         io.pop.stream.valid := True
         when(io.pop.stream.ready) {
-          spliter := spliter + 1
-          when(wordCounter === wordCountEndAt && spliter === spliterEndAt) {
+          splitter := splitter + 1
+          when(wordCounter === wordCountEndAt && splitter === splitterEndAt) {
             state := State.WAIT
             fifo.io.pop.stream.ready := True
             io.pop.stream.last := True
           }
-          when(spliter === spliter.maxValue) {
+          when(splitter === splitter.maxValue) {
             wordCounter := wordCounter + 1
             fifo.io.pop.stream.ready := True
           }
@@ -367,6 +367,18 @@ case class MacTxInterFrame(dataWidth : Int, withError : Boolean = false) extends
 object MacTxLso extends App{
   SpinalConfig(privateNamespace = true).generateVerilog(new MacTxLso(2048, 1500+14))
 }
+object MacTxLsoBuffered extends App{
+  SpinalConfig(privateNamespace = true).generateVerilog(new Component{
+    setDefinitionName("MacTxLso")
+    val io = new Bundle{
+      val input = slave(Stream(Fragment(PhyTx(8))))
+      val output = master(Stream(Fragment(PhyTx(8))))
+    }
+    val lso = new MacTxLso(2048, 1500+14)
+    lso.io.input <-/< io.input
+    lso.io.output >/-> io.output
+  })
+}
 
 case class MacTxLso(bufferBytes : Int, mtuMax : Int, packetsMax : Int = 15) extends Component{
 
@@ -449,6 +461,8 @@ case class MacTxLso(bufferBytes : Int, mtuMax : Int, packetsMax : Int = 15) exte
   }
 
   val frontend = new StateMachine{
+    setEncoding(binaryOneHot)
+
     val ETH, DONE, IPV4, IPV4_UNKNOWN, TCP, UDP, ICMP, CS_WRITE_0, CS_WRITE_1, IP4_LENGTH_0, IP4_LENGTH_1, IP4_CS_0, IP4_CS_1 = new State()
     val TSO_DATA = new State()
     setEntry(ETH)
@@ -483,10 +497,11 @@ case class MacTxLso(bufferBytes : Int, mtuMax : Int, packetsMax : Int = 15) exte
       val inputLsb = CombInit(counter.lsb)
       val inputData = CombInit(io.input.data)
       val input = inputLsb.mux(B"x00" ## inputData, inputData ## B"x00").asUInt
-      val s0 = accumulator +^ input
-      val s1 = s0(15 downto 0) + s0.msb.asUInt
+      val sNoOverflow = accumulator +^ input
+      val sOverflow = accumulator +^ input + 1
+      val sMuxed = sNoOverflow.msb.mux(sOverflow, sNoOverflow)(15 downto 0)
       when(push){
-        accumulator := s1
+        accumulator := sMuxed
       }
       when(clear){
         accumulator := 0
@@ -498,7 +513,7 @@ case class MacTxLso(bufferBytes : Int, mtuMax : Int, packetsMax : Int = 15) exte
     val checksumTso, checksumIp = new CheckSum() {
       val checkpoint = Reg(UInt(16 bits))
       val save, restore = False
-      when(save){ checkpoint := s1}
+      when(save){ checkpoint := sMuxed }
       when(restore){ accumulator := checkpoint}
     }
 
@@ -652,7 +667,7 @@ case class MacTxLso(bufferBytes : Int, mtuMax : Int, packetsMax : Int = 15) exte
     }
 
 
-    val tsoPacketLast = packetBytes + 1 === packetBytesMax
+    val tsoPacketLast = packetBytes === packetBytesMax-1
     TSO_DATA whenIsActive{
       buffer.write.data.last setWhen(tsoPacketLast)
       when(io.input.fire) {

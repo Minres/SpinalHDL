@@ -280,7 +280,7 @@ trait BusSlaveFactory extends Area{
 
 
   /**
-    * Create a write only register of type dataType at address and placed at bitOffset in the word
+    * Create a write-only register of type dataType at address and placed at bitOffset in the word
     */
   def createWriteOnly[T <: Data](dataType      : T,
                                  address       : BigInt,
@@ -293,7 +293,7 @@ trait BusSlaveFactory extends Area{
 
 
   /**
-    * Create a read only register of type dataType at address and placed at bitOffset in the word
+    * Create a read-only register of type dataType at address and placed at bitOffset in the word
     */
   def createReadOnly[T <: Data](dataType      : T,
                                 address       : BigInt,
@@ -305,7 +305,7 @@ trait BusSlaveFactory extends Area{
   }
 
   /**
-    * Create a read write register of type dataType at address and placed at bitOffset in the word
+    * Create a read-write register of type dataType at address and placed at bitOffset in the word
     */
   def createReadAndWrite[T <: Data](dataType      : T,
                                     address       : BigInt,
@@ -384,6 +384,21 @@ trait BusSlaveFactory extends Area{
     that
   }
 
+
+  def clearOnClear[T <: Data](that      : T,
+                          address   : BigInt,
+                          bitOffset : Int = 0): T = {
+    val bitSets = nonStopWrite(Bits(widthOf(that) bits), bitOffset)
+    when(isWriting(address)){
+      for(i <- 0 until widthOf(that)){
+        when(!bitSets(i)){
+          that.assignFromBits(B"0", i, 1 bits)
+        }
+      }
+    }
+    that
+  }
+
   def setOnClear[T <: Data](that      : T,
                           address   : BigInt,
                           bitOffset : Int = 0): T = {
@@ -418,6 +433,19 @@ trait BusSlaveFactory extends Area{
     val flow = Flow(dataType)
     driveFlow(flow, address, bitOffset, checkByteEnable, documentation)
     flow
+  }
+
+  /**
+   * Emit on that a transaction when a write happen at address, by using data placed at bitOffset in the word.
+   * Block the write transaction until the transaction succeeds (stream becomes ready).
+   */
+  def createAndDriveStream[T <: Data](dataType       : T,
+                                      address        : BigInt,
+                                      bitOffset      : Int = 0,
+                                      documentation  : String = null): Stream[T] = {
+    val stream = Stream(dataType)
+    driveStream(stream, address, bitOffset, documentation)
+    stream
   }
 
   /**
@@ -546,7 +574,7 @@ trait BusSlaveFactory extends Area{
    * Emit on that a transaction when a write happen at address, by using data placed at bitOffset in the word.
    * Block the write transaction until the transaction succeeds (stream becomes ready).
    */
-  def driveStream[T <: Data](that: Stream[T], address: BigInt, bitOffset: Int = 0): Unit = {
+  def driveStream[T <: Data](that: Stream[T], address: BigInt, bitOffset: Int = 0, documentation: String = null): Unit = {
     val wordCount = (bitOffset + widthOf(that.payload) - 1) / busDataWidth + 1
     onWritePrimitive(SizeMapping(address, wordCount * wordAddressInc), haltSensitive = false, null) {
       when(!that.ready) {
@@ -554,7 +582,7 @@ trait BusSlaveFactory extends Area{
       }
     }
     val flow = Flow(that.payloadType())
-    driveFlow(flow, address, bitOffset, checkByteEnable = true)
+    driveFlow(flow, address, bitOffset, checkByteEnable = true, documentation = documentation)
     that << flow.toStream
   }
 

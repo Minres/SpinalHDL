@@ -162,6 +162,10 @@ class ComponentEmitterVerilog(
             val name = component.localNamingScope.allocateName(portName)
             declarations ++= emitExpressionWrap(s, name, "reg")
             wrappedExpressionToName(s) = name
+          case s: MemReadAsyncWrite =>
+            val name = component.localNamingScope.allocateName(portName)
+            declarations ++= emitExpressionWrap(s, name)
+            wrappedExpressionToName(s) = name
           case s: MemWrite    =>
         }
         portId += 1
@@ -279,7 +283,7 @@ class ComponentEmitterVerilog(
     syncGroups.valuesIterator.foreach(emitSynchronous(component, _))
 
     component.dslBody.walkStatements{
-      case s: TreeStatement => s.algoIncrementale = algoIdIncrementalBase
+      case s: TreeStatement => s.algoIncremental = algoIdIncrementalBase
       case s                =>
     }
   }
@@ -287,6 +291,7 @@ class ComponentEmitterVerilog(
   def emitInitials() : Unit = {
     var withRandBoot = ArrayBuffer[(BaseType, String)]();
     var withInitBoot = ArrayBuffer[(BaseType, String)]();
+    var withSimInit = ArrayBuffer[(BaseType, String)]();
     component.dslBody.walkDeclarations {
       case bt: BaseType => {
         if (!bt.isSuffix) {
@@ -298,18 +303,31 @@ class ComponentEmitterVerilog(
             case null =>
             case str  => withInitBoot += bt -> str
           }
+          getBaseTypeSignalSimInit(bt) match {
+            case null =>
+            case str  => withSimInit += bt -> str
+          }
         }
       }
       case _ =>
     }
 
-    if(initials.isEmpty && withRandBoot.isEmpty && withInitBoot.isEmpty) return
+    if(initials.isEmpty && withRandBoot.isEmpty && withInitBoot.isEmpty && withSimInit.isEmpty) return
     logics ++= "  initial begin\n"
     emitLeafStatements(initials, 0, c.dslBody, "=", logics , "    ")
 
     if(withRandBoot.nonEmpty) {
       logics ++= "  `ifndef SYNTHESIS\n"
       for ((bt, str) <- withRandBoot) {
+        val name = emitReference(bt, false)
+        logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
+      }
+      logics ++= "  `endif\n"
+    }
+
+    if(withSimInit.nonEmpty) {
+      logics ++= "  `ifndef SYNTHESIS\n"
+      for((bt, str) <- withSimInit){
         val name = emitReference(bt, false)
         logics ++= s"${theme.maintab + theme.maintab}${name}${str};\n"
       }
@@ -374,11 +392,11 @@ class ComponentEmitterVerilog(
 
       val instanceAttributes = emitSyntaxAttributes(child.instanceAttributes)
 
-      val istracingOff = child.hasTag(TracingOff)
+      val isTracingOff = child.hasTag(TracingOff)
 
       logics ++= commentTagsToString(child, "  //")
 
-      if(istracingOff){
+      if(isTracingOff) {
         logics ++= s" ${emitCommentAttributes(List(Verilator.tracing_off))} \n"
       }
 
@@ -484,7 +502,7 @@ class ComponentEmitterVerilog(
       logics ++= s"  );"
       logics ++= s"\n"
 
-      if(istracingOff){
+      if(isTracingOff){
         logics ++= s" ${emitCommentAttributes(List(Verilator.tracing_on))} \n"
       }
     }
@@ -755,7 +773,16 @@ class ComponentEmitterVerilog(
           case assertStatement: AssertStatement => {
             val cond = emitExpression(assertStatement.cond)
 
-            val frontString = (for (m <- assertStatement.message) yield m match {
+            val includeLocation = assertStatement.hasTag(reportIncludeSourceLocation)
+            val locationPrefix = if (includeLocation) {
+              val format = ReportFormatting.resolveFormat(assertStatement, spinalConfig)
+              ReportFormatting.renderPrefix(format, assertStatement.loc, assertStatement.severity)
+            } else {
+              ""
+            }
+            val messageInput = assertStatement.message
+
+            val frontString = (for (m <- messageInput) yield m match {
               case m: String => m
               case m: SpinalEnumCraft[_] => "%s"
               case m: Expression => "%x"
@@ -763,7 +790,7 @@ class ComponentEmitterVerilog(
               case x => SpinalError(s"""L\"\" can't manage the parameter '${x}' type. Located at :\n${statement.getScalaLocationLong}""")
             }).mkString.replace("\n", "\\n")
 
-            val backString = (for (m <- assertStatement.message if !m.isInstanceOf[String]) yield m match {
+            val backString = (for (m <- messageInput if !m.isInstanceOf[String]) yield m match {
               case m: SpinalEnumCraft[_] => ", " + emitExpression(m) + "_string"
               case m: Expression => ", " + emitExpression(m)
               case `REPORT_TIME` => ", $time"
@@ -776,12 +803,7 @@ class ComponentEmitterVerilog(
             }
 
             if (!systemVerilog) {
-              val severity = assertStatement.severity match {
-                case `NOTE` => "NOTE"
-                case `WARNING` => "WARNING"
-                case `ERROR` => "ERROR"
-                case `FAILURE` => "FAILURE"
-              }
+              val severity = ReportFormatting.severityLabel(assertStatement.severity)
 
               b ++= s"${tab}`ifndef SYNTHESIS\n"
               b ++= s"${tab}  `ifdef FORMAL\n"
@@ -791,7 +813,8 @@ class ComponentEmitterVerilog(
               /* Emulate them using $display */
               val zeroTimeCond = if (spinalConfig.noAssertAtTimeZero) " && $realtime != 0" else ""
               b ++= s"${tab}    if(!${cond}${zeroTimeCond}) begin\n"
-              b ++= s"""${tab}      $$display("$severity $frontString"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
+              val frontStringWithPrefix = if (includeLocation) s"$locationPrefix$frontString" else s"$severity $frontString"
+              b ++= s"""${tab}      $$display("$frontStringWithPrefix"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
               if (assertStatement.severity == `FAILURE`) b ++= tab + "      $finish;\n"
               b ++= s"${tab}    end\n"
               b ++= s"${tab}  `endif\n"
@@ -806,7 +829,8 @@ class ComponentEmitterVerilog(
               if (assertStatement.kind == AssertStatementKind.ASSERT && !spinalConfig.formalAsserts) {
                 val zeroTimeCond = if (spinalConfig.noAssertAtTimeZero) " || $realtime == 0" else ""
                 b ++= s"${tab}$keyword(${cond}${zeroTimeCond}) else begin\n"
-                b ++= s"""${tab}  $severity("$frontString"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
+                val frontStringWithPrefix = if (includeLocation) s"$locationPrefix$frontString" else frontString
+                b ++= s"""${tab}  $severity("$frontStringWithPrefix"$backString); // ${assertStatement.loc.file}.scala:L${assertStatement.loc.line}\n"""
                 if (assertStatement.severity == `FAILURE`) b ++= tab + "  $finish;\n"
                 b ++= s"${tab}end\n"
               } else {
@@ -1155,6 +1179,50 @@ class ComponentEmitterVerilog(
     null
   }
 
+  def getBaseTypeSignalSimInit(signal: BaseType): String = {
+    if(signal.isReg){
+      signal.getTag(classOf[SimInitTag]) match {
+        case Some(tag) =>
+          try {
+            val result = tag.value match {
+              case bvl: BitVectorLiteral =>
+                val targetWidth = signal.getBitsWidth
+                val value = bvl.getValue()
+
+                // Handle negative values
+                val unsignedValue = if (value >= 0) {
+                  value
+                } else {
+                  (BigInt(1) << targetWidth) + value
+                }
+
+                // Use hex for width > 4, binary for width <= 4
+                if (targetWidth > 4) {
+                  val hexDigits = (targetWidth + 3) / 4
+                  val hexValue = unsignedValue.toString(16)
+                  val paddedHex = ("0" * (hexDigits - hexValue.length)) + hexValue
+                  s"${targetWidth}'h${paddedHex}"
+                } else {
+                  val binValue = unsignedValue.toString(2)
+                  val paddedBin = ("0" * (targetWidth - binValue.length)) + binValue
+                  s"${targetWidth}'b${paddedBin}"
+                }
+              case _ =>
+                emitExpressionNoWrappeForFirstOne(tag.value)
+            }
+            " = " + result
+          } catch {
+            case e: Exception =>
+              SpinalError(s"Failed to process SimInit for signal $signal: ${e.getMessage}. " +
+                s"SimInit value must be a compile-time constant. Tag value: ${tag.value}, type: ${tag.value.getClass}")
+          }
+        case None => null
+      }
+    } else {
+      null
+    }
+  }
+
   var memBitsMaskKind: MemBitsMaskKind = MULTIPLE_RAM
   val enumDebugStringList = ArrayBuffer[(SpinalEnumCraft[_ <: SpinalEnum], String, Int)]()
   val localEnums          = mutable.LinkedHashSet[(SpinalEnum, SpinalEnumEncoding)]()
@@ -1486,8 +1554,21 @@ end
               case _ => SpinalError(s"memReadWrite can only be emited as readFirst, writeFirst, noChange or dontCare into Verilog $memReadWrite")
             }
         }
+      case memReadAsyncWrite: MemReadAsyncWrite  =>
+        if(memReadAsyncWrite.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memReadAsyncWrite.mem} because of its mixed width ports")
 
+        if (memReadAsyncWrite.readUnderWrite != writeFirst) SpinalWarning(s"mem.readAsyncWrite can only be write first into Verilog")
 
+        val symbolCount = memReadAsyncWrite.mem.getMemSymbolCount()
+        if(memBitsMaskKind == SINGLE_RAM || symbolCount == 1)
+          tmpBuilder ++= s"  assign ${emitExpression(memReadAsyncWrite)} = ${emitReference(memReadAsyncWrite.mem, false)}[${emitExpression(memReadAsyncWrite.address)}];\n"
+        else
+          (0 until symbolCount).foreach(i => tmpBuilder  ++= s"  assign ${emitExpression(memReadAsyncWrite)}[${(i + 1) * symbolWidth - 1} : ${i * symbolWidth}] = ${emitReference(memReadAsyncWrite.mem, false)}_symbol$i[${emitExpression(memReadAsyncWrite.address)}];\n")
+
+        emitClockedProcess((tab, b) => {
+          val symbolCount = memReadAsyncWrite.mem.getMemSymbolCount()
+          emitWrite(b, memReadAsyncWrite.mem, emitExpression(memReadAsyncWrite.writeEnable), memReadAsyncWrite.address, memReadAsyncWrite.data, memReadAsyncWrite.mask, memReadAsyncWrite.mem.getMemSymbolCount(), memReadAsyncWrite.mem.getMemSymbolWidth(),tab)
+        }, null, tmpBuilder, memReadAsyncWrite.clockDomain, false)
       case memReadSync: MemReadSync   =>
         if(memReadSync.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memReadSync.mem} because of its mixed width ports")
         if(memReadSync.readUnderWrite == writeFirst) SpinalError(s"memReadSync with writeFirst is as dontCare into Verilog $memReadSync")

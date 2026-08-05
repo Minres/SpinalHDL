@@ -53,7 +53,10 @@ class FiberPlugin extends Area with Hostable {
 
   override def setHost(h: PluginHost): Unit = {
     h.addService(this)
-    subservices.foreach(h.addService)
+    subservices.foreach {
+      case s: Hostable => s.setHost(h)
+      case s => h.addService(s)
+    }
     host = h
     if(!isNamed){
       this.setName(ClassName(this))
@@ -88,6 +91,28 @@ class FiberPlugin extends Area with Hostable {
             lockables.foreach(_().release())
           }
           ret
+        }
+      }
+    }
+
+    def patch[T: ClassTag](body: => T): Handle[T] = spinal.core.fiber.Fiber patch {
+      pluginEnabled generate {
+        hostLock.await()
+        val onCreate = OnCreateStack.getOrElse(null)
+        host.rework {
+          OnCreateStack.set(onCreate)
+          body
+        }
+      }
+    }
+
+    def check[T: ClassTag](body: => T): Handle[T] = spinal.core.fiber.Fiber check {
+      pluginEnabled generate {
+        hostLock.await()
+        val onCreate = OnCreateStack.getOrElse(null)
+        host.rework {
+          OnCreateStack.set(onCreate)
+          body
         }
       }
     }

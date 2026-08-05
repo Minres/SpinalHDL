@@ -37,7 +37,7 @@ class TimingExtractorSdc(path : File, marginFactor : Double) extends TimingExtra
 
   def freqToTimeSingle(cd : ClockDomain) = (cd.frequency match {
     case f : FixedFrequency => f.getValue.toTime.toBigDecimal * 1e9
-    case _ => SpinalError("Unknown frequancy for " + cd.clock)
+    case _ => SpinalError("Unknown frequency for " + cd.clock)
   })*marginFactor
 
   def writeFalsePath(target: Any, tag: crossClockFalsePath) : Unit = {
@@ -65,13 +65,13 @@ class TimingExtractorSdc(path : File, marginFactor : Double) extends TimingExtra
 
   override def writeInputDelay(bt: BaseType): Unit = {
     bt.getTag(classOf[ClockDomainReportTag]) match {
-      case Some(tag) => o.println(s"set_input_delay -clock ${pathOf(tag.clockDomain.clock)} -max ??? ${pathOf(bt)}")
+      case Some(tag) => o.println(s"set_input_delay -clock ${pathOf(tag.clockDomain.clock)} -max $$INPUT_DELAY_DEFAULT ${pathOf(bt)}")
       case _ => println(s"no input delay for $bt")
     }
   }
   override def writeOutputDelay(bt: BaseType): Unit = {
     bt.getTag(classOf[ClockDomainReportTag]) match {
-      case Some(tag) => o.println(s"set_output_delay -clock ${pathOf(tag.clockDomain.clock)} -min ??? ${pathOf(bt)}")
+      case Some(tag) => o.println(s"set_output_delay -clock ${pathOf(tag.clockDomain.clock)} -min $$OUTPUT_DELAY_DEFAULT ${pathOf(bt)}")
       case _ => println(s"no output delay for $bt")
     }
   }
@@ -111,8 +111,8 @@ object TimingExtractor {
       val frequencies = mutable.LinkedHashSet[ClockDomain.ClockFrequency]()
       frequencies ++= cds.map(_.frequency)
       if(frequencies.size > 1) {
-        val filtred = frequencies.filter(!_.isInstanceOf[ClockDomain.UnknownFrequency])
-        frequencies.clear(); frequencies ++= filtred
+        val filtered = frequencies.filter(!_.isInstanceOf[ClockDomain.UnknownFrequency])
+        frequencies.clear(); frequencies ++= filtered
       }
       assert(frequencies.size == 1)
       listener.writeClock(clock, frequencies.head)
@@ -128,6 +128,10 @@ object TimingExtractor {
       case _ =>
     })
     top.getAllIo.foreach {
+      // TODO: need a separate tag (ClockInputDelayTag?):
+      //  - find tag on any wire
+      //  - verify that it comes directly from input port
+      //  - write input delay for the input port with this tag
       case bt if bt.isInput => listener.writeInputDelay(bt)
       case bt if bt.isOutput => listener.writeOutputDelay(bt)
     }
@@ -154,6 +158,7 @@ object TimingExtractor {
     case s : Mem[_] => None
     case p : MemReadSync => Some(p.clockDomain)
     case p : MemReadWrite => Some(p.clockDomain)
+    case p : MemReadAsyncWrite => Some(p.clockDomain)
     case p : MemWrite => Some(p.clockDomain)
     case p : AssertStatement => Some(p.clockDomain)
   }
@@ -166,13 +171,18 @@ object TimingExtractor {
   }
 
   def crossClockMaxDelay(target: Statement, tag: crossClockMaxDelay, listener : TimingExtractorListener): Unit = {
-    var sources = mutable.LinkedHashSet[Any]()
+    val sources = mutable.LinkedHashSet[Any]()
     target match {
       case target : BaseType => AnalysisUtils.seekNonCombDrivers (target) (sources.add)
       case target : MemReadSync => AnalysisUtils.seekNonCombDrivers (target) (sources.add)
     }
 
-    if (sources.isEmpty) println(s"??? no source found for $target while writeMaxDelay")
+    if (sources.isEmpty) println(
+      s"""
+        |!!! No valid source found for $target
+        |    while writing a max delay constraint, skipping.  If the target does not have
+        |    a non-combinatorial driver in the netlist (register or memory), you need to
+        |    mark the driver with a ClockDomainTag.""".stripMargin)
     for(source <- sources; if isCrossClock(target, source)) listener.writeMaxDelay(target, source, tag)
   }
 

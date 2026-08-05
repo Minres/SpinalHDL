@@ -99,7 +99,7 @@ class RegInst(name: String, addr: BigInt, doc: String, busif: BusIf, sec: Secure
     (acc, symbol.name.startsWith("<local")) match {
       case (`ROV`, _) =>
       case (_, true)  =>{
-        SpinalWarning("an unload signal created; `val signame = field(....)` is recomended instead `field(....)`")
+        SpinalWarning("an unload signal created; `val signame = field(....)` is recommended instead `field(....)`")
         reg.setName("unload", weak = true)
       }
       case (_, false) =>reg.setName(symbol.name, weak = true)
@@ -118,15 +118,15 @@ class RegInst(name: String, addr: BigInt, doc: String, busif: BusIf, sec: Secure
   * val reg32bit = REG0.field(Bits(32 bit), RW , 0xffff, "clock enable reg RW")
   *                REG1.parasiteField(reg32bit,     W1S, 0xffff, "clock enable reg write 1 set ")
   *                REG2.parasiteField(reg32bit,     W1C, 0xffff, "clock enable reg write 1 clear")
-  * val regwire  = REG3.field(Bits(32 bit), RO , 0xffff, "clock enable read only")
+  * val regwire  = REG3.field(Bits(32 bit), RO , 0xffff, "clock enable read-only")
   * regwire := reg32bit
   * */
   def parasiteField[T <: BaseType](reg: T, acc: AccessType, resetValue: BigInt, doc: String): Unit = {
-    assert(reg.isReg, "prasiteField should be register only, check please")
+    assert(reg.isReg, "parasiteField should be register only, check please")
     registerInWithWriteLogic(reg, acc, resetValue, doc)
   }
   def parasiteFieldAt[T <: BaseType](pos: Int, reg: T, acc: AccessType, resetValue: BigInt, doc: String): Unit = {
-    assert(reg.isReg, "prasiteField should be register only, check please")
+    assert(reg.isReg, "parasiteField should be register only, check please")
     registerAtWithWriteLogic(pos, reg, acc, resetValue, doc)
   }
 
@@ -163,7 +163,7 @@ class RegInst(name: String, addr: BigInt, doc: String, busif: BusIf, sec: Secure
   private def setname[T <: BaseType](reg: T, symbol: SymbolName) = {
     symbol.name.startsWith("<local") match {
       case true => {
-        SpinalWarning("an unload signal created; `val signame = field(....)` is recomended instead `field(....)`")
+        SpinalWarning("an unload signal created; `val signame = field(....)` is recommended instead `field(....)`")
         reg.setName("unload", weak = true)
       }
       case false => reg.setName(symbol.name, weak = true)
@@ -268,7 +268,7 @@ class RegInst(name: String, addr: BigInt, doc: String, busif: BusIf, sec: Secure
       case AccessType.RWHS  => _W( reg, section)                   // SoftWare RW then HardWare Set
       case AccessType.W1CHS => _WB(reg, section, AccessType.W1C )   //- W: 1 clears/no effect on matching bit, R: no effect
       case AccessType.W1SHS => _WB(reg, section, AccessType.W1S )   //- W: 1 sets/no effect on matching bit, R: no effect
-      case x: AccessType.CSTM  =>                                  // CSTM-AccessType don't generate logic which implement use themselfs, only register for doc
+      case x: AccessType.CSTM  =>                                  // CSTM-AccessType don't generate logic which implement use themselves, only register for doc
     }
   }
 

@@ -85,7 +85,7 @@ object AFix {
   def UQ(integerWidth: BitCount, fractionWidth: BitCount): AFix = AFix(integerWidth.value exp, -fractionWidth.value exp, signed = false)
   def U(amplitude: ExpNumber, width: BitCount): AFix = AFix(amplitude, (amplitude.value - width.value) exp, false)
   def U(amplitude: ExpNumber, resolution: ExpNumber): AFix = AFix(amplitude, resolution, false)
-//  def U(wholeBits: BitCount, exp: ExpNumber): AFix = AFix(wholeBits, -exp bit, false)
+  def U(width: BitCount, resolution: ExpNumber): AFix = AFix((resolution.value + width.value) exp, resolution, signed = false)
 //  def U(maximum: BigInt, resolution: ExpNumber): AFix = {
 //    assert(maximum >= 0, s"AFix.U maxRaw must be non-negative! (${maximum} is not >= 0)")
 //    new AFix(maximum*BigInt(2).pow(-resolution.value)+(BigInt(2).pow(-resolution.value)-1), 0, resolution)
@@ -102,7 +102,7 @@ object AFix {
   def SQ(integerWidth: BitCount, fractionWidth: BitCount): AFix = AFix(integerWidth.value exp, -fractionWidth.value exp, signed = true)
   def S(amplitude: ExpNumber, width: BitCount): AFix = AFix(amplitude, (amplitude.value - width.value + 1) exp, true)
   def S(amplitude: ExpNumber, resolution: ExpNumber): AFix = AFix(amplitude, resolution, signed = true)
-//  def S(wholeBits: BitCount, exp: ExpNumber): AFix = AFix(wholeBits+(1 bit), -exp bit, signed = true)
+  def S(width: BitCount, resolution: ExpNumber): AFix = AFix((resolution.value + width.value - 1) exp, resolution, signed = true)
 //  def S(maximum: BigInt, resolution: ExpNumber): AFix =
 //    new AFix(maximum.max(0)*BigInt(2).pow(-resolution.value)+(BigInt(2).pow(-resolution.value)*maximum.signum-maximum.signum),
 //      maximum.min(0)*BigInt(2).pow(-resolution.value)+(BigInt(2).pow(-resolution.value)*maximum.signum-maximum.signum), resolution)
@@ -425,7 +425,7 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
   }
 
   /**
-   * Mutiplies `this` by the right hand side AFix value expanding ranges as necessary
+   * Multiplies `this` by the right hand side AFix value expanding ranges as necessary
    * @param right Value to multiply `this` by
    * @return Product
    */
@@ -572,7 +572,7 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
   // Shift bits and decimal point left, adding padding bits right
   def <<|(shift: Int): AFix = {
     val shiftBig = BigInt(2).pow(shift)
-    val ret = new AFix(this.maxRaw * shiftBig, this.minRaw * shiftBig, (this.exp + shift))
+    val ret = new AFix(this.maxRaw * shiftBig, this.minRaw * shiftBig, this.exp)
 
     ret.raw := this.raw << shift
 
@@ -662,12 +662,16 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     if(this.minRaw >= 0)
       ret.raw := U(this.raw).twoComplement(enable, plusOneEnable).asBits
     else
-      ret.raw := S(this.raw).twoComplement(enable, plusOneEnable).asBits
+      ret.raw := S(this.raw).twoComplement(enable, plusOneEnable).asBits.resized
     ret
   }
 
+  /** Changes the resolution of the AFix without changing its represented value, by adding low bits. */
   def resize(newExp : ExpNumber): AFix ={
-    assert(newExp.value < exp, s"AFix resize loses precision -- use a rounding function instead") //for now
+    assert(newExp.value <= exp, s"AFix resize loses precision -- use a rounding function instead") //for now
+    if (newExp.value == exp) {  // no-op
+        return CombInit(this)
+    }
     val dif = exp - newExp.value
     val ret = new AFix(
       this.maxRaw * (BigInt(1) << dif),
@@ -1066,6 +1070,37 @@ class AFix(val maxRaw: BigInt, val minRaw: BigInt, val exp: Int) extends MultiDa
     val res = AFix(Q)
     res := this.fixTo(res, roundType)
     res
+  }
+
+  /** Round an AFix to a specific exponent, using a specified rounding type. */
+  def round(newExp: ExpNumber, rounding: RoundType, align: Boolean): AFix = this._round(rounding, newExp.value, align)
+  def round(newExp: ExpNumber, rounding: RoundType): AFix = round(newExp, rounding, align = getTrunc.saturation)
+  def round(newExp: ExpNumber): AFix = round(newExp, rounding = getTrunc.rounding, align = getTrunc.saturation)
+  /** Round an AFix to a specific bit width, using a specified roundType type. */
+  def round(bits: BitCount, rounding: RoundType, ignoreExpand: Boolean, align: Boolean): AFix = {
+    val newLeftExp = leftExp - bits.value
+    val prospect = round(newLeftExp exp, rounding, align)
+    // sometimes rounding can expand the representable range and give us an extra MSB
+    if (ignoreExpand || prospect.getBitsWidth == bits.value) {
+      prospect
+    } else {
+      round(newLeftExp + 1 exp, rounding, align)
+    }
+  }
+  def round(bits: BitCount, rounding: RoundType, ignoreExpand: Boolean): AFix = round(bits, rounding, ignoreExpand, align = getTrunc.saturation)
+  def round(bits: BitCount, rounding: RoundType): AFix = round(bits, rounding, ignoreExpand = true, align = getTrunc.saturation)
+  def round(bits: BitCount): AFix = round(bits, rounding = getTrunc.rounding, ignoreExpand = true, align = getTrunc.saturation)
+  /** Round an AFix in such a way that the given number of bits are removed. */
+  def roundOffBits(bits: BitCount, rounding: RoundType = getTrunc.rounding, ignoreExpand: Boolean = true, align: Boolean = getTrunc.saturation): AFix = {
+    assert(bits.value < numWidth, "cannot round away all the bits of a number!")
+    val newExp = exp + bits.value
+    val prospect = round(newExp exp, rounding, align)
+    // sometimes rounding can expand the representable range and give us an extra MSB
+    if (ignoreExpand || prospect.getBitsWidth + bits.value == getBitsWidth) {
+      prospect
+    } else {
+      round(newExp + 1 exp, rounding, align)
+    }
   }
 
   override def toString: String = {

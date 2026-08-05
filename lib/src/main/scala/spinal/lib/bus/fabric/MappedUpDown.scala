@@ -7,10 +7,11 @@ import spinal.lib._
 import scala.collection.mutable.ArrayBuffer
 
 
-trait UpDown[C] extends Nameable{
-  var withUps, withDowns = true //Used for assertion
+trait UpDown[C] extends Nameable {
+  var withUps, withDowns = true // Used for assertion
   val ups = ArrayBuffer[C]()
   val downs = ArrayBuffer[C]()
+  var allowNoSlave = false
 
   def setSlaveOnly(): this.type = {
     assert(withUps)
@@ -24,8 +25,13 @@ trait UpDown[C] extends Nameable{
     this
   }
 
+  def setAllowNoSlave() : this.type = {
+    allowNoSlave = true
+    this
+  }
+
   def assertUpDown(): Unit = {
-    if (withDowns && downs.isEmpty) SpinalError(s"${getName()} has no slave")
+    if (withDowns && downs.isEmpty && !allowNoSlave) SpinalError(s"${getName()} has no slave")
     if (!withDowns && downs.nonEmpty) SpinalError(s"${getName()} has slaves")
 
     if (withUps && ups.isEmpty) SpinalError(s"${getName()} has no master")

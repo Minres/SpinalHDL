@@ -67,7 +67,7 @@ class StreamFragmentPimped[T <: Data](pimped: Stream[Fragment[T]]) {
  */
   def reduce[U <: Data](identity: U, accumulator: (U, U, T) => Unit): Stream[U] = {
     val next = new Stream(identity).setCompositeName(pimped, "reduced", true)
-    val acc = Reg(identity)
+    val acc = RegInit(identity)
     
     accumulator(next.payload, acc, pimped.fragment)
     
@@ -152,11 +152,11 @@ class StreamFragmentPimped[T <: Data](pimped: Stream[Fragment[T]]) {
   }
 
   def toFragmentBits(bitsWidth: Int): Stream[Fragment[Bits]] = {
-    val pimpedWidhoutLast = (Stream(pimped.fragment)).translateFrom(pimped)((to, from) => {
+    val pimpedWithoutLast = (Stream(pimped.fragment)).translateFrom(pimped)((to, from) => {
       to := from.fragment
     })
 
-    val fragmented = pimpedWidhoutLast.fragmentTransaction(bitsWidth)
+    val fragmented = pimpedWithoutLast.fragmentTransaction(bitsWidth)
 
     return (Stream Fragment (Bits(bitsWidth bit))).translateFrom(fragmented)((to, from) => {
       to.last := from.last && pimped.last
@@ -578,7 +578,7 @@ object StreamFragmentGenerator {
 
 object StreamFragmentArbiter {
    def apply[T <: Data](dataType: T)(inputs: Seq[Stream[Fragment[T]]]): Stream[Fragment[T]] = {
-    val arbiter = new StreamArbiter(Fragment(dataType), inputs.size)(StreamArbiter.Arbitration.lowerFirst, StreamArbiter.Lock.fragmentLock)
+    val arbiter = new StreamArbiter(Fragment(dataType), inputs.size, StreamArbiter.LowerFirst, StreamArbiter.TransactionLock)
     (inputs, arbiter.io.inputs).zipped.foreach(_ >> _)
     arbiter.io.output
   }
@@ -586,7 +586,7 @@ object StreamFragmentArbiter {
 
 object StreamFragmentArbiterAndHeaderAdder {
   def apply[T <: Data](dataType: T)(inputs: Seq[Tuple2[Stream[Fragment[T]], T]]): Stream[Fragment[T]] = {
-    val arbiter = new StreamArbiter(Fragment(dataType), inputs.size)(StreamArbiter.Arbitration.lowerFirst, StreamArbiter.Lock.fragmentLock)
+    val arbiter = new StreamArbiter(Fragment(dataType), inputs.size, StreamArbiter.LowerFirst, StreamArbiter.TransactionLock)
     (inputs, arbiter.io.inputs).zipped.foreach(_._1 >> _)
 
     val ret = Stream Fragment (dataType)

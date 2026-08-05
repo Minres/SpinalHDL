@@ -124,7 +124,7 @@ abstract class BitVector extends BaseType with Widthable {
 
     var result = cloneOf(this).asInstanceOf[T]
     result := this.asInstanceOf[T]
-    for(i <- that.range){
+    for(i <- that.bitsRange) {
       result \= (that(i) ? result.rotateLeft(1 << i).asInstanceOf[T] | result)
     }
     result
@@ -139,7 +139,7 @@ abstract class BitVector extends BaseType with Widthable {
 
     var result = cloneOf(this).asInstanceOf[T]
     result := this.asInstanceOf[T]
-    for(i <- that.range){
+    for(i <- that.bitsRange) {
       result \= (that(i) ? result.rotateRight(1 << i).asInstanceOf[T] | result)
     }
     result
@@ -193,9 +193,9 @@ abstract class BitVector extends BaseType with Widthable {
   }
 
   /**
-    * Resize the bitVector to width
+    * Resize the BitVector to width
     * @example{{{ val res = myBits.resize(10) }}}
-    * @return a resized bitVector
+    * @return a resized BitVector
     */
   def resize(width: Int): BitVector
   def resize(width: BitCount): BitVector
@@ -335,12 +335,12 @@ abstract class BitVector extends BaseType with Widthable {
   }
 
   /**
-   * Split the BitVector into slice of x bits
+   * Split this [[BitVector]] into slices of at most `sliceWidth` bits
    *
    * @example {{{ val res = myBits.subdivideIn(3 bits) }}}
    * @param sliceWidth the width of the slice
    * @param strict     allow `subdivideIn` to generate vectors with varying size
-   * @return a Vector of slices
+   * @return a `Vec[BitVector]` of at most `sliceWidth` bits
    */
   def subdivideIn(sliceWidth: BitCount, strict: Boolean): Vec[T] = {
     val width = widthOf(this)
@@ -352,8 +352,12 @@ abstract class BitVector extends BaseType with Widthable {
     )
   }
 
-
   def subdivideIn(sliceCount: SlicesCount): Vec[T] = subdivideIn(sliceCount, true)
+
+  /** Return this [[BitVector]] splitted in a `Vec[BitVector]` of strictly `sliceWidth` bits
+    * 
+    * @see `subdivideIn(sliceWidth: BitCount, strict: Boolean)`
+    */
   def subdivideIn(sliceWidth: BitCount): Vec[T] = subdivideIn(sliceWidth, true)
 
 

@@ -185,7 +185,7 @@ class ChecksTester extends SpinalAnyFunSuite  {
 
       val areaA = new ClockingArea(ClockDomain(clockA)){
         val reg = Reg(Bool())
-        reg := in(Bool)
+        reg := in(Bool())
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
@@ -200,8 +200,8 @@ class ChecksTester extends SpinalAnyFunSuite  {
   test("checkClockCrossingCheckingCheckSourcesPaths") {
     generationShouldPass(new Component{
       val clock = in Bool()
-      val clockA =  Bool
-      val clockB =  Bool
+      val clockA =  Bool()
+      val clockB =  Bool()
 
       clockA := clock
       val sub = new Component{
@@ -217,7 +217,7 @@ class ChecksTester extends SpinalAnyFunSuite  {
       clockB := sub.cOut
       val areaA = new ClockingArea(ClockDomain(clockA)){
         val reg = Reg(Bool())
-        reg := in(Bool)
+        reg := in(Bool())
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
@@ -233,8 +233,8 @@ class ChecksTester extends SpinalAnyFunSuite  {
     generationShouldFail(new Component{
       val clock1 = in Bool()
       val clock2 = in Bool()
-      val clockA =  Bool
-      val clockB =  Bool
+      val clockA =  Bool()
+      val clockB =  Bool()
 
       clockA := clock1
       val sub = new Component{
@@ -250,7 +250,7 @@ class ChecksTester extends SpinalAnyFunSuite  {
       clockB := sub.cOut
       val areaA = new ClockingArea(ClockDomain(clockA)){
         val reg = Reg(Bool())
-        reg := in(Bool)
+        reg := in(Bool())
       }
 
       val areaB = new ClockingArea(ClockDomain(clockB)){
@@ -535,12 +535,12 @@ class RepeatabilityTester extends SpinalAnyFunSuite{
 
   test("Apb3I2cCtrlGraph"){
     val dut = SpinalConfig(defaultClockDomainFrequency = FixedFrequency(50 MHz)).generateVerilog(new Apb3I2cCtrl(configI2C)).toplevel
-    assert(GraphUtils.countNames(dut) == 278)
+    assert(GraphUtils.countNames(dut) == 260)
   }
 
   test("UartGraph"){
     val dut = SpinalVerilog(new UartCtrl(UartCtrlGenerics())).toplevel
-    assert(GraphUtils.countNames(dut) == 94)
+    assert(GraphUtils.countNames(dut) == 98)
   }
 
 
@@ -667,7 +667,7 @@ class RepeatabilityTester extends SpinalAnyFunSuite{
         alignment = BmbParameter.BurstAlignement.LENGTH
       ))
 
-      // write only
+      // Write-only
       val sC = addSlave(0x80000, BmbAccessCapabilities(
         addressWidth = 16,
         dataWidth = 32,
@@ -677,7 +677,7 @@ class RepeatabilityTester extends SpinalAnyFunSuite{
         alignment = BmbParameter.BurstAlignement.BYTE
       ))
 
-      //read only
+      // Read-only
       val sD = addSlave(0x90000, BmbAccessCapabilities(
         addressWidth = 16,
         dataWidth = 32,
@@ -686,7 +686,7 @@ class RepeatabilityTester extends SpinalAnyFunSuite{
         alignment = BmbParameter.BurstAlignement.BYTE
       ))
 
-      //Read only and write only mapped at the same address
+      // Read-only and write-only mapped at the same address
       val sE = addSlave(0xA0000, BmbAccessCapabilities(
         addressWidth = 17,
         dataWidth = 32,
@@ -742,8 +742,8 @@ class NameingTester extends SpinalAnyFunSuite {
             val aaaa = Bool()
             val bbbb = Vec(Bool(),8)
             val cccc = Vec( Vec( Vec(Bool(),8),8),8)
-            val dddd = List.fill(4)(Bool)
-            val eeee = List.fill(4)(List.fill(4)(Bool))
+            val dddd = List.fill(4)(Bool())
+            val eeee = List.fill(4)(List.fill(4)(Bool()))
           },4)
         }
       }

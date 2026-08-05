@@ -58,7 +58,7 @@ class AxiLite4Bridge(p : NodeParameters) extends Component{
       io.down.ar.valid := forked.valid &&  isGet
       forked.ready := isGet.mux(io.down.ar.ready, io.down.aw.ready)
 
-      val address = forked.address | (counter << log2Up(p.m.dataBytes)).resized
+      val address = forked.address | ((counter | cmdFork.beatCounter()) << log2Up(p.m.dataBytes)).resized
 
       for (ax <- List(io.down.aw, io.down.ar)) {
         ax.addr := address
@@ -66,10 +66,10 @@ class AxiLite4Bridge(p : NodeParameters) extends Component{
       }
     }
     val data = new Area{
-      val filtred = dataFork.takeWhen(dataFork.opcode === Opcode.A.PUT_FULL_DATA || dataFork.opcode === Opcode.A.PUT_PARTIAL_DATA)
-      io.down.w.arbitrationFrom(filtred)
-      io.down.w.data := filtred.data
-      io.down.w.strb := filtred.mask
+      val filtered = dataFork.takeWhen(dataFork.opcode === Opcode.A.PUT_FULL_DATA || dataFork.opcode === Opcode.A.PUT_PARTIAL_DATA)
+      io.down.w.arbitrationFrom(filtered)
+      io.down.w.data := filtered.data
+      io.down.w.strb := filtered.mask
     }
   }
 
