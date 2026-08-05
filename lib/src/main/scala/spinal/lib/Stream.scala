@@ -1659,6 +1659,9 @@ class StreamFifo[T <: Data](val dataType: HardType[T],
           case true => vec.read(addressGen.payload)
           case false => ram.readAsync(addressGen.payload)
         }
+        when (ptr.empty) {
+          readed.clearAll()
+        }
         io.pop << addressGen.translateWith(readed)
         ptr.popOnIo := ptr.pop
 

@@ -1304,7 +1304,24 @@ class ComponentEmitterVerilog(
       declarations ++= s"  ${emitSyntaxAttributes(mem.instanceAttributes(Language.VERILOG))}reg ${emitCommentEarlyAttributes(mem.instanceAttributes(Language.VERILOG))}${emitRange(mem)} ${emitReference(mem,false)} [0:${mem.wordCount - 1}]${emitCommentAttributes(mem.instanceAttributes(Language.VERILOG))};\n"
     }
 
-    if (mem.initialContent != null) {
+    val emitInitialValues = if(mem.technology == registerFile && mem.initialContent != null)  {
+      (tab: String, b:mutable.StringBuilder) => {
+        for ((value, index) <- mem.initialContent.zipWithIndex) {
+          val unfilledValue = value.toString(2)
+          val filledValue = "0" * (mem.getWidth - unfilledValue.length) + unfilledValue
+          if (memBitsMaskKind == MULTIPLE_RAM && symbolCount != 1) {
+            for (i <- 0 until symbolCount) {
+              b ++= s"${tab}${emitReference(mem, false)}_symbol$i[$index] <= 'b${filledValue.substring(symbolWidth * (symbolCount - i - 1), symbolWidth * (symbolCount - i))};\n"
+            }
+          } else {
+            b ++= s"${tab}${emitReference(mem, false)}[$index] <= ${filledValue.length}'b$filledValue;\n"
+          }
+        }
+
+      }
+    } else null
+
+    if (mem.initialContent != null && mem.technology != registerFile) {
       if(!caseRom) {
         logics ++= "  initial begin\n"
         if (nativeRom) {
@@ -1485,7 +1502,7 @@ end
 
           if(memWrite.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memWrite.mem} because of its mixed width ports")
           emitWrite(b, memWrite.mem,  if (memWrite.writeEnable != null) emitExpression(memWrite.writeEnable) else null.asInstanceOf[String], memWrite.address, memWrite.data, memWrite.mask, memWrite.mem.getMemSymbolCount(), memWrite.mem.getMemSymbolWidth(), tab)
-        }, null, tmpBuilder, memWrite.clockDomain, false)
+        }, emitInitialValues, tmpBuilder, memWrite.clockDomain, emitInitialValues != null)
       case memReadWrite: MemReadWrite  =>
         if(memReadWrite.aspectRatio != 1) SpinalError(s"Verilog backend can't emit ${memReadWrite.mem} because of its mixed width ports")
 
@@ -1502,7 +1519,7 @@ end
             emitClockedProcess((tab, b) => {
               val symbolCount = memReadWrite.mem.getMemSymbolCount()
               emitWrite(b, memReadWrite.mem,s"${emitExpression(memReadWrite.chipSelect)} && ${emitExpression(memReadWrite.writeEnable)} ", memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(),tab)
-            }, null, tmpBuilder, memReadWrite.clockDomain, false)
+            }, emitInitialValues, tmpBuilder, memReadWrite.clockDomain, emitInitialValues != null)
           case `dontRead` =>
             if(memReadWrite.readUnderWrite != dontCare) SpinalError(s"memReadWrite can only be emited as dontCare into Verilog $memReadWrite")
             emitClockedProcess((tab, b) => {
@@ -1514,7 +1531,7 @@ end
               emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "    ")
               b ++= s"${tab}  end\n"
               b ++= s"${tab}end\n"
-            }, null, tmpBuilder, memReadWrite.clockDomain, false)
+            }, emitInitialValues, tmpBuilder, memReadWrite.clockDomain, emitInitialValues != null)
           case `doRead` =>
             memReadWrite.readUnderWrite match {
               case `dontCare` =>
@@ -1528,7 +1545,7 @@ end
                 emitClockedProcess((tab, b) => {
                   val symbolCount = memReadWrite.mem.getMemSymbolCount()
                   emitWrite(b, memReadWrite.mem,s"${emitExpression(memReadWrite.chipSelect)} && ${emitExpression(memReadWrite.writeEnable)} ", memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(),tab)
-                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+                }, emitInitialValues, tmpBuilder, memReadWrite.clockDomain, emitInitialValues != null)
               case `writeFirst` =>
                 assert(mem.cldCount == 1)
                 emitClockedProcess((tab, b) => {
@@ -1541,7 +1558,7 @@ end
                   emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "    ")
                   b ++= s"${tab}  end\n"
                   b ++= s"${tab}end\n"
-                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+                }, emitInitialValues, tmpBuilder, memReadWrite.clockDomain, emitInitialValues != null)
               case `readFirst` =>
                 assert(mem.cldCount == 1)
                 emitClockedProcess((tab, b) => {
@@ -1550,7 +1567,7 @@ end
                   emitRead(b, memReadWrite.mem, memReadWrite.address, memReadWrite, tab + "  ")
                   emitWrite(b, memReadWrite.mem,  if (memReadWrite.writeEnable != null) emitExpression(memReadWrite.writeEnable) else null.asInstanceOf[String], memReadWrite.address, memReadWrite.data, memReadWrite.mask, memReadWrite.mem.getMemSymbolCount(), memReadWrite.mem.getMemSymbolWidth(), tab + "  ")
                   b ++= s"${tab}end\n"
-                }, null, tmpBuilder, memReadWrite.clockDomain, false)
+                }, emitInitialValues, tmpBuilder, memReadWrite.clockDomain, emitInitialValues != null)
               case _ => SpinalError(s"memReadWrite can only be emited as readFirst, writeFirst, noChange or dontCare into Verilog $memReadWrite")
             }
         }

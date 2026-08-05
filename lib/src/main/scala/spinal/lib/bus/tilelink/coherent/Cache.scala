@@ -182,6 +182,7 @@ class Cache(val p : CacheParam) extends Component {
     }
     val interrupt = withCtrl generate (out Bool())
     val flush = withFlushBus generate slave(FlushBus(p.flushBusParam))
+    // val flushActive = withFlush generate out Bool()
   }
 
   this.addTags(io.ordering.all.map(OrderingTag(_)))
@@ -217,6 +218,7 @@ class Cache(val p : CacheParam) extends Component {
     }
   }
 
+
   case class Tags(val withData : Boolean) extends Bundle {
     val loaded = Bool()
     val tag = UInt(tagRange.size bits)
@@ -232,7 +234,11 @@ class Cache(val p : CacheParam) extends Component {
     val sets = bytes / blockSize / ways
     val plru = new Area{
       val ram = Mem.fill(sets)(Plru.State(cacheWays))
-      val read = ram.readSyncPort
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
+      val read = ram.readSyncPortMuxed()
       val write = ram.writePort
     }
 
@@ -431,6 +437,10 @@ class Cache(val p : CacheParam) extends Component {
   val gs = new SlotPool(generalSlotCount)(new GeneralSlot){
     val ctxDownD = new Area{
       val ram = Mem.fill(generalSlotCount)(CtxDownD())
+      ram.initBigInt(List.fill(generalSlotCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
     val fullUpA = slots.dropRight(p.generalSlotCountUpCOnly).map(_.valid).andR
@@ -469,6 +479,7 @@ class Cache(val p : CacheParam) extends Component {
 
   val flushFsm = withFlushFsm generate new Area {
     val reserved = RegInit(False)
+    val idle = RegInit(True)
     val address, upTo = Reg(ubp.address())
     val start = False
     val completionsOnComb = UInt(log2Up(flushCompletionsCount) bits)
@@ -478,6 +489,8 @@ class Cache(val p : CacheParam) extends Component {
     val completionsOnReg = Reg(UInt(log2Up(flushCompletionsCount) bits)) init(0)
     val completionsEnableReg = RegInit(True)
 
+    io.flushActive := !idle
+
     val cmd = Stream(new CtrlCmd())
     val fsm = new StateMachine {
       val IDLE, CMD, INFLIGHT, GS = new State()
@@ -485,6 +498,7 @@ class Cache(val p : CacheParam) extends Component {
       val inflight = CounterUpDown(1 << log2Up(generalSlotCount + ctrlLoopbackDepth + 4))
       val gsMask = Reg(Bits(generalSlotCount bits))
 
+<<<<<<< HEAD
       IDLE.whenIsActive{
         when(start){
           when(completionsEnableComb){
@@ -495,6 +509,18 @@ class Cache(val p : CacheParam) extends Component {
           goto(CMD)
         }
       }
+=======
+      val WAIT = new StateDelay(cyclesCount = 50) {
+        whenCompleted {
+          goto(CMD)
+        }
+      }
+
+      IDLE.whenIsActive(when(start) {
+        idle := False
+        goto(WAIT)
+      })
+>>>>>>> dev
 
       CMD whenIsActive {
         when(cmd.fire) {
@@ -516,9 +542,13 @@ class Cache(val p : CacheParam) extends Component {
       GS whenIsActive {
         when(gsMask === 0) {
           reserved := False
+<<<<<<< HEAD
           when(completionsEnableReg){
             completions(completionsOnReg) := True
           }
+=======
+          idle := True
+>>>>>>> dev
           goto(IDLE)
         }
       }
@@ -561,6 +591,7 @@ class Cache(val p : CacheParam) extends Component {
 
   val ctrlLogic = withCtrl generate new Area {
     val mapper = new SlaveFactory(io.ctrl, allowBurst = true)
+<<<<<<< HEAD
     mapper.read(flushFsm.completions, 0x00, 0)
     mapper.clearOnSet(flushFsm.completions, 0x00, 0)
 
@@ -575,6 +606,14 @@ class Cache(val p : CacheParam) extends Component {
 
     mapper.writeMultiWord(flushFsm.address, 0x10)
     mapper.writeMultiWord(flushFsm.upTo, 0x18)
+=======
+    mapper.setOnSet(flush.start, 0x08, 1)
+    flush.reserved setWhen (!flush.reserved && mapper.isReading(0x08))
+    mapper.read(flush.reserved || withSelfFlush.mux(selfFlusher.isActive(selfFlusher.CMD), False), 0x08)
+    mapper.writeMultiWord(flush.address, 0x10)
+    mapper.writeMultiWord(flush.upTo, 0x18)
+    mapper.read(flush.idle, 0x20)
+>>>>>>> dev
   }
 
   val fromUpA = new Area{
@@ -641,6 +680,10 @@ class Cache(val p : CacheParam) extends Component {
   val prober = new SlotPool(probeCount)(new ProberSlot){
     val ctx = new Area{
       val ram = Mem.fill(probeCount)(new CtrlCmd())
+      ram.initBigInt(List.fill(ram.wordCount)(0))
+      if(GlobalData.get.config.device == Device.ASIC) {
+        ram.technology = registerFile
+      }
       val write = ram.writePort()
     }
 
@@ -878,8 +921,8 @@ class Cache(val p : CacheParam) extends Component {
     val tags = new Area{
       import tagStage._
       val read = tagStage(CACHE_TAGS)
-      val CACHE_HITS  = insert(read.map(t => t.loaded && t.tag === CTRL_CMD.address(tagRange)).asBits)
-      val SOURCE_HITS = insert(read.map(t => (t.owners & inserter.SOURCE_OH).orR).asBits)
+      val CACHE_HITS  = insert(read.map { t => t.loaded && t.tag === CTRL_CMD.address(tagRange)}.asBits)
+      val SOURCE_HITS = insert(read.map { t => (t.owners & inserter.SOURCE_OH).orR}.asBits)
     }
 
     val preCtrl = new Area{
@@ -1966,5 +2009,9 @@ object DirectoryGen extends App{
 tricky cases :
 - release while a probe is going on
 - release data just before victim probe logic is enabled => think data are still in the victim buffer, while is already written to memory by release data
+<<<<<<< HEAD
 - acquire T then release data before the victim of the acquire got time to read the $ and get overridden by release data
+=======
+- acquire T then release data before the victim of the acquire got time to read the $ and get overriden by release data
+>>>>>>> dev
  */

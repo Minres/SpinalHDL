@@ -31,6 +31,7 @@ import java.util.Date
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.io.Source
+import scala.reflect.{ClassTag, classTag}
 import scala.util.matching.Regex
 
 
@@ -62,6 +63,8 @@ case class Device(vendor: String = "?",
                   name: String = "?",
                   supportBootResetKind : Boolean = true){
   def isVendorDefault = vendor == "?"
+
+  def withFamily(family: String): Device = Device(vendor, family, name, supportBootResetKind)
 }
 object Device{
   val ALTERA = Device(vendor = "altera")
@@ -73,6 +76,16 @@ object Device{
   val NONE = Device(vendor = "none")
 
   def get = GlobalData.get.config.device
+
+  def matchFamily[T: ClassTag](usePrimitive: Boolean, mappings: (Device, () => T)*)(fallback: () => T): T = {
+    if (!usePrimitive) return fallback()
+    val device = Device.get
+    mappings.foreach {mapping =>
+      if (device.vendor == mapping._1.vendor && device.family == mapping._1.family) return mapping._2()
+    }
+    SpinalWarning(s"Did not find primitive of type ${classTag[T].runtimeClass.getSimpleName} for device $device; using generic fallback")
+    fallback()
+  }
 }
 
 
