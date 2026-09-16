@@ -489,7 +489,7 @@ class Cache(val p : CacheParam) extends Component {
     val completionsOnReg = Reg(UInt(log2Up(flushCompletionsCount) bits)) init(0)
     val completionsEnableReg = RegInit(True)
 
-    io.flushActive := !idle
+    //io.flushActive := !idle
 
     val cmd = Stream(new CtrlCmd())
     val fsm = new StateMachine {
@@ -498,7 +498,6 @@ class Cache(val p : CacheParam) extends Component {
       val inflight = CounterUpDown(1 << log2Up(generalSlotCount + ctrlLoopbackDepth + 4))
       val gsMask = Reg(Bits(generalSlotCount bits))
 
-<<<<<<< HEAD
       IDLE.whenIsActive{
         when(start){
           when(completionsEnableComb){
@@ -509,8 +508,7 @@ class Cache(val p : CacheParam) extends Component {
           goto(CMD)
         }
       }
-=======
-      val WAIT = new StateDelay(cyclesCount = 50) {
+      /*val WAIT = new StateDelay(cyclesCount = 50) {
         whenCompleted {
           goto(CMD)
         }
@@ -519,8 +517,7 @@ class Cache(val p : CacheParam) extends Component {
       IDLE.whenIsActive(when(start) {
         idle := False
         goto(WAIT)
-      })
->>>>>>> dev
+      })*/
 
       CMD whenIsActive {
         when(cmd.fire) {
@@ -542,13 +539,10 @@ class Cache(val p : CacheParam) extends Component {
       GS whenIsActive {
         when(gsMask === 0) {
           reserved := False
-<<<<<<< HEAD
           when(completionsEnableReg){
             completions(completionsOnReg) := True
           }
-=======
-          idle := True
->>>>>>> dev
+          //idle := True
           goto(IDLE)
         }
       }
@@ -591,7 +585,6 @@ class Cache(val p : CacheParam) extends Component {
 
   val ctrlLogic = withCtrl generate new Area {
     val mapper = new SlaveFactory(io.ctrl, allowBurst = true)
-<<<<<<< HEAD
     mapper.read(flushFsm.completions, 0x00, 0)
     mapper.clearOnSet(flushFsm.completions, 0x00, 0)
 
@@ -606,14 +599,6 @@ class Cache(val p : CacheParam) extends Component {
 
     mapper.writeMultiWord(flushFsm.address, 0x10)
     mapper.writeMultiWord(flushFsm.upTo, 0x18)
-=======
-    mapper.setOnSet(flush.start, 0x08, 1)
-    flush.reserved setWhen (!flush.reserved && mapper.isReading(0x08))
-    mapper.read(flush.reserved || withSelfFlush.mux(selfFlusher.isActive(selfFlusher.CMD), False), 0x08)
-    mapper.writeMultiWord(flush.address, 0x10)
-    mapper.writeMultiWord(flush.upTo, 0x18)
-    mapper.read(flush.idle, 0x20)
->>>>>>> dev
   }
 
   val fromUpA = new Area{
