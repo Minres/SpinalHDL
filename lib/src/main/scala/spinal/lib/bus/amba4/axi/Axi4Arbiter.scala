@@ -75,8 +75,10 @@ case class Axi4WriteOnlyArbiter(outputConfig: Axi4Config,
   val routeDataInput = io.inputs(routeBuffer.payload).writeData
   io.output.writeData.valid := routeBuffer.valid && routeDataInput.valid
   io.output.writeData.payload  := routeDataInput.payload
-  io.output.writeData.id.removeAssignments()
-  io.output.writeData.id := (routeBuffer.payload @@ routeDataInput.id)
+  if (outputConfig.useWid) {
+    io.output.writeData.id.removeAssignments()
+    io.output.writeData.id := (routeBuffer.payload @@ routeDataInput.id)
+  }
   io.inputs.zipWithIndex.foreach{case(input,idx) => {
     input.writeData.ready := routeBuffer.valid && io.output.writeData.ready && routeBuffer.payload === idx
   }}
