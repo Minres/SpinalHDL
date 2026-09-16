@@ -288,7 +288,7 @@ case class MacRxBuffer(pushCd : ClockDomain,
     }
 
     when(commit){
-      when(error || drop || full) {
+      when(error || drop) {
         currentPtr := oldPtr
       } otherwise {
         oldPtr := currentPtrPlusOne
