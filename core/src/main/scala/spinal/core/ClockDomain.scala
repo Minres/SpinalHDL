@@ -251,6 +251,10 @@ object ClockDomain {
     def getValue: HertzNumber
     def getMax:   HertzNumber
     def getMin:   HertzNumber
+    def getCycles(time: TimeNumber): BigInt = {
+      (time.toBigDecimal * getValue.toBigDecimal)
+        .setScale(0, BigDecimal.RoundingMode.UP).toBigInt
+    }
   }
 
 

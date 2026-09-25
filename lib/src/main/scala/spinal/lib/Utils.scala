@@ -536,8 +536,7 @@ object Timeout {
   def apply(cycles: BigInt): Timeout = new Timeout(cycles)
 
   def apply(time: TimeNumber): Timeout = new Timeout(
-    ((time.toBigDecimal * ClockDomain.current.frequency.getValue.toBigDecimal)
-      .setScale(0, BigDecimal.RoundingMode.UP)).toBigInt
+    ClockDomain.current.frequency.getCycles(time)
   )
 
   def apply(frequency: HertzNumber): Timeout = Timeout(frequency.toTime)
