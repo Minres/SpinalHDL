@@ -65,6 +65,11 @@ case class Device(vendor: String = "?",
   def isVendorDefault = vendor == "?"
 
   def withFamily(family: String): Device = Device(vendor, family, name, supportBootResetKind)
+
+  def matches(other: Device): Boolean = matchesVendor(other.vendor) && matchesFamily(other.family) && matchesName(other.name)
+  def matchesVendor(v: String): Boolean = vendor == v || v == "?"
+  def matchesFamily(f: String): Boolean = family == f || f == "?"
+  def matchesName(n: String): Boolean = name == n || n == "?"
 }
 object Device{
   val ALTERA = Device(vendor = "altera")
@@ -72,6 +77,7 @@ object Device{
   val LATTICE = Device(vendor = "lattice")
   val ACTEL = Device(vendor = "actel")
   val EFINIX = Device(vendor = "efinix")
+  val NX = Device(vendor = "nanoxplore")
   val ASIC = Device(vendor = "asic", supportBootResetKind = false)
   val NONE = Device(vendor = "none")
 
@@ -85,6 +91,13 @@ object Device{
     }
     SpinalWarning(s"Did not find primitive of type ${classTag[T].runtimeClass.getSimpleName} for device $device; using generic fallback")
     fallback()
+  }
+  def matchDevice[T: ClassTag](mappings: (Device, () => T)*): T = {
+    val device = Device.get
+    mappings.foreach {mapping =>
+      if (device.matches(mapping._1)) return mapping._2()
+    }
+    SpinalError(s"Did not find implementation of type ${classTag[T].runtimeClass.getSimpleName} for device $device")
   }
 }
 
